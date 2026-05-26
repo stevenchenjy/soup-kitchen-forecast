@@ -10,8 +10,8 @@ class User:
 
 
 USERS = {
-    "admin": {"password": "admin123", "role": "admin"},
-    "staff": {"password": "staff123", "role": "staff"},
+    "admin": {"password": "VeryStrongAdmin2026", "role": "admin"},
+    "staff": {"password": "SoupKitchenStaff2026", "role": "staff"},
 }
 
 

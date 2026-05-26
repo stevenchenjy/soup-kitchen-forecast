@@ -1,0 +1,25 @@
+{
+  "locations": [
+    {
+      "id": "ny_12550",
+      "name": "Newburgh, NY 12550",
+      "zip_code": "12550",
+      "country_code": "US",
+      "timezone": "America/New_York"
+    },
+    {
+      "id": "nyc_10001",
+      "name": "New York, NY 10001",
+      "zip_code": "10001",
+      "country_code": "US",
+      "timezone": "America/New_York"
+    },
+    {
+      "id": "boston_02108",
+      "name": "Boston, MA 02108",
+      "zip_code": "02108",
+      "country_code": "US",
+      "timezone": "America/New_York"
+    }
+  ]
+}

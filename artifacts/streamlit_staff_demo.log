@@ -1,0 +1,43 @@
+
+  You can now view your Streamlit app in your browser.
+
+  URL: http://127.0.0.1:8502
+
+2026-04-11 18:18:35.542 Please replace `use_container_width` with `width`.
+
+`use_container_width` will be removed after 2025-12-31.
+
+For `use_container_width=True`, use `width='stretch'`. For `use_container_width=False`, use `width='content'`.
+2026-04-11 18:18:42.056 Please replace `use_container_width` with `width`.
+
+`use_container_width` will be removed after 2025-12-31.
+
+For `use_container_width=True`, use `width='stretch'`. For `use_container_width=False`, use `width='content'`.
+2026-04-11 18:18:45.004 Please replace `use_container_width` with `width`.
+
+`use_container_width` will be removed after 2025-12-31.
+
+For `use_container_width=True`, use `width='stretch'`. For `use_container_width=False`, use `width='content'`.
+2026-04-11 18:18:46.982 Please replace `use_container_width` with `width`.
+
+`use_container_width` will be removed after 2025-12-31.
+
+For `use_container_width=True`, use `width='stretch'`. For `use_container_width=False`, use `width='content'`.
+2026-04-11 18:19:00.466 Please replace `use_container_width` with `width`.
+
+`use_container_width` will be removed after 2025-12-31.
+
+For `use_container_width=True`, use `width='stretch'`. For `use_container_width=False`, use `width='content'`.
+2026-04-11 18:19:12.777 Please replace `use_container_width` with `width`.
+
+`use_container_width` will be removed after 2025-12-31.
+
+For `use_container_width=True`, use `width='stretch'`. For `use_container_width=False`, use `width='content'`.
+Training rows: 323
+Feature columns: 26
+Overall metrics: {'MAE': 13.234527059400826, 'RMSE': 16.65394997756474, 'MAPE': 0.09644684351920509, 'Bias': -2.6268897032897653, 'P90AbsError': 27.328940873015945, 'BacktestRows': 287}
+Sat metrics: {'MAE': 12.551906600039123, 'RMSE': 16.300113697123713, 'MAPE': 0.10662494532581811, 'Bias': -0.20624192924751167, 'P90AbsError': 27.410314200856753, 'BacktestRows': 145}
+Sun metrics: {'MAE': 13.931569077763127, 'RMSE': 17.00766704908766, 'MAPE': 0.08605371139273406, 'Bias': -5.098677923262488, 'P90AbsError': 26.751253503522612, 'BacktestRows': 142}
+Residual buffer by day: {'sat': 27.410314200856753, 'sun': 26.751253503522612}
+Saved model: /Users/linlixiang/Desktop/code/基于历史数据的到访人数预测与备餐辅助系统/models/visitor_model.joblib
+  Stopping...

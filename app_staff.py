@@ -1,0 +1,108 @@
+import subprocess
+import sys
+from pathlib import Path
+
+import streamlit as st
+
+from src.auth import authenticate
+from src.config import TARGET_COL, model_file_for_location
+from src.data_admin import delete_record, load_clean_data, upsert_record
+from src.location_config import list_locations
+from src.predictor import VisitorPredictor
+
+ROOT = Path(__file__).resolve().parent
+
+st.set_page_config(page_title="Staff Meal Prep Assistant", layout="centered")
+
+
+
+def login_gate() -> None:
+    st.title("Login")
+    with st.form("login_form"):
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        ok = st.form_submit_button("Login")
+    if ok:
+        user = authenticate(username.strip(), password)
+        if user is None:
+            st.error("Invalid username or password")
+        else:
+            st.session_state["user"] = {"username": user.username, "role": user.role}
+            st.rerun()
+    st.stop()
+
+
+if "user" not in st.session_state:
+    login_gate()
+
+user = st.session_state["user"]
+if user["role"] not in {"admin", "staff"}:
+    st.error("No permission.")
+    st.stop()
+
+locations = list_locations()
+loc_names = {loc.name: loc.id for loc in locations}
+
+st.title("Staff Meal Prep Assistant")
+st.caption("Per-location view with independent data/model storage")
+
+sidebar = st.sidebar
+sidebar.markdown(f"**User:** {user['username']} ({user['role']})")
+selected_name = sidebar.selectbox("Location", options=list(loc_names.keys()))
+location_id = loc_names[selected_name]
+if sidebar.button("Logout"):
+    st.session_state.clear()
+    st.rerun()
+
+model_path = model_file_for_location(location_id)
+if not model_path.exists():
+    st.warning(f"Model not found for location '{location_id}'.")
+    if st.button("Train this location", type="primary"):
+        with st.spinner("Training..."):
+            r = subprocess.run([sys.executable, str(ROOT / "scripts" / "train_backtest.py"), "--location", location_id], cwd=ROOT)
+        if r.returncode == 0:
+            st.success("Training completed")
+            st.rerun()
+        else:
+            st.error("Training failed")
+    st.stop()
+
+predictor = VisitorPredictor(str(model_path))
+df = load_clean_data(location_id)
+
+st.subheader(f"Daily Actions - {selected_name}")
+buf = st.slider("Base meal buffer (%)", 0, 30, 8, 1)
+custom_date = st.text_input("Target service date (Saturday/Sunday, YYYY-MM-DD)", value="")
+if st.button("Get meal recommendation", type="primary"):
+    pred = predictor.predict_next(target_date=custom_date or None, meal_buffer_pct=buf / 100.0)
+    st.success(
+        f"Location: {location_id} | {pred.service_date:%Y-%m-%d} | Suggested meal prep: {pred.suggested_meals} "
+        f"(Point: {pred.predicted_visitors:.1f}, Quantile: {pred.predicted_quantile:.1f}, Residual: +{pred.residual_buffer:.1f})"
+    )
+
+st.subheader("Quick Data Maintenance")
+add_date = st.date_input("Service date", value=None, key="staff_add_date")
+add_visitors = st.number_input("Visitors", min_value=0, max_value=10000, value=120, step=1)
+if st.button("Add / Update"):
+    if add_date is not None:
+        upsert_record(str(add_date), int(add_visitors), location_id)
+        st.success("Saved.")
+        st.rerun()
+
+if not df.empty:
+    del_options = [d.strftime("%Y-%m-%d") for d in df["service_date"].sort_values()]
+    del_date = st.selectbox("Delete date", options=del_options)
+    if st.button("Delete"):
+        delete_record(del_date, location_id)
+        st.success("Deleted.")
+        st.rerun()
+
+st.dataframe(df[["service_date", TARGET_COL]], use_container_width=True, height=300)
+
+if st.button("Incremental retraining", type="primary"):
+    with st.spinner("Training..."):
+        r = subprocess.run([sys.executable, str(ROOT / "scripts" / "retrain_incremental.py"), "--location", location_id], cwd=ROOT)
+    if r.returncode == 0:
+        st.success("Training completed.")
+    else:
+        st.error("Training failed.")

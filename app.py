@@ -204,6 +204,76 @@ def render_data_ops():
             st.error("Training failed.")
 
 
+def render_master_accounts(users):
+    st.subheader("Master/Admin Accounts")
+    master_users = [account for account in users if require_role(account, {"master", "admin"})]
+    if master_users:
+        rows = [
+            {
+                "Username": account["username"],
+                "Role": account["role"],
+                "Authorized locations": ", ".join(account.get("authorized_locations", [])) or "None",
+            }
+            for account in master_users
+        ]
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+    else:
+        st.info("No master/admin accounts have been created yet.")
+
+    st.markdown("**Create master/admin account**")
+    with st.form("create_master_account"):
+        new_admin_username = st.text_input("New admin username")
+        new_admin_password = st.text_input("New admin password", type="password")
+        create_admin_ok = st.form_submit_button("Create master/admin account")
+    if create_admin_ok:
+        new_admin_username = new_admin_username.strip()
+        password_error = validate_password(new_admin_password)
+        if not new_admin_username:
+            st.error("Please enter a username.")
+        elif password_error:
+            st.error(password_error)
+        elif any(account["username"].lower() == new_admin_username.lower() for account in users):
+            st.error("That username already exists.")
+        else:
+            users.append(
+                {
+                    "username": new_admin_username,
+                    "role": "master",
+                    "authorized_locations": ["*"],
+                    **hash_password(new_admin_password),
+                }
+            )
+            save_users(users)
+            st.success(f"Created master/admin account '{new_admin_username}'.")
+            st.rerun()
+
+    if not master_users:
+        return
+
+    st.markdown("**Reset master/admin password**")
+    reset_admin = st.selectbox(
+        "Master/admin account",
+        options=[account["username"] for account in master_users],
+        key="admin_password_reset_account",
+    )
+    with st.form("reset_admin_password"):
+        reset_admin_password = st.text_input("New password", type="password")
+        reset_admin_ok = st.form_submit_button("Reset password")
+    if reset_admin_ok:
+        password_error = validate_password(reset_admin_password)
+        if password_error:
+            st.error(password_error)
+        else:
+            for account in users:
+                if account["username"] == reset_admin:
+                    account.pop("password", None)
+                    account.update(hash_password(reset_admin_password))
+                    break
+            save_users(users)
+            st.success(f"Password reset for '{reset_admin}'.")
+            st.rerun()
+
+
 def render_staff_access():
     st.subheader("Staff Accounts")
     users = load_users()
@@ -229,6 +299,8 @@ def render_staff_access():
         st.dataframe(rows, use_container_width=True, hide_index=True)
     else:
         st.info("No staff accounts have been created yet.")
+
+    render_master_accounts(users)
 
     st.markdown("**Create staff account**")
     with st.form("create_staff_account"):

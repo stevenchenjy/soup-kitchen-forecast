@@ -2,19 +2,23 @@
   "users": [
     {
       "username": "admin",
-      "password": "VeryStrongAdmin2026",
       "role": "master",
       "authorized_locations": [
         "*"
-      ]
+      ],
+      "password_hash": "6b407c4ae7a25644a146d7f91e4c508aa2227b1b67bcabcdc02d5e21dba7575f",
+      "salt": "d8e33a8773a4764787fb1653daba6c5d",
+      "iterations": 200000
     },
     {
       "username": "staff",
-      "password": "SoupKitchenStaff2026",
       "role": "staff",
       "authorized_locations": [
         "ny_12550"
-      ]
+      ],
+      "password_hash": "8270cc9492f16a745acb96c756848792e3ef94ec424eed947e1aa9d101590ac9",
+      "salt": "601dd9725fd5af149bc13fc42140dc3d",
+      "iterations": 200000
     }
   ]
 }

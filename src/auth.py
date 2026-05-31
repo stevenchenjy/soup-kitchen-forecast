@@ -165,6 +165,10 @@ def load_users() -> list[dict[str, Any]]:
     return users
 
 
+def _same_username(left: str, right: str) -> bool:
+    return left.strip().lower() == right.strip().lower()
+
+
 def save_users(users: list[dict[str, Any]]) -> None:
     USERS_FILE.parent.mkdir(parents=True, exist_ok=True)
     normalized_users: list[dict[str, Any]] = []
@@ -183,7 +187,7 @@ def save_users(users: list[dict[str, Any]]) -> None:
 def get_user(username: str) -> dict[str, Any] | None:
     username = username.strip()
     for user in load_users():
-        if user["username"] == username:
+        if _same_username(user["username"], username):
             return _public_user(user)
     return None
 
@@ -192,7 +196,7 @@ def authenticate_user(username: str, password: str) -> dict[str, Any] | None:
     username = username.strip()
     users = load_users()
     for index, user in enumerate(users):
-        if user["username"] != username:
+        if not _same_username(user["username"], username):
             continue
         if _verify_password(password, user):
             return _public_user(user)
@@ -202,6 +206,49 @@ def authenticate_user(username: str, password: str) -> dict[str, Any] | None:
             save_users(users)
             return _public_user(migrated_user)
     return None
+
+
+def delete_user(username: str) -> bool:
+    username = username.strip()
+    users = load_users()
+    kept_users = [user for user in users if not _same_username(user["username"], username)]
+    if len(kept_users) == len(users):
+        return False
+    save_users(kept_users)
+    return True
+
+
+def validate_user_record(username: str) -> dict[str, Any]:
+    username = username.strip()
+    if not username:
+        return {"passed": False, "reason": "Username is empty."}
+
+    user = next((row for row in load_users() if _same_username(row["username"], username)), None)
+    if user is None:
+        return {"passed": False, "reason": "Username does not exist."}
+
+    role = user.get("role")
+    if role not in {"master", "staff"}:
+        return {"passed": False, "reason": "Role must be master or staff."}
+
+    authorized_locations = user.get("authorized_locations")
+    if not isinstance(authorized_locations, list):
+        return {"passed": False, "reason": "authorized_locations must be a list."}
+    if role == "master" and authorized_locations != ["*"]:
+        return {"passed": False, "reason": "Master accounts must use authorized_locations ['*']."}
+    if role == "staff":
+        if not authorized_locations:
+            return {"passed": False, "reason": "Staff account has no authorized locations."}
+        if "*" in authorized_locations:
+            return {"passed": False, "reason": "Wildcard '*' is only valid for master accounts."}
+    if any(not isinstance(location_id, str) or not location_id.strip() for location_id in authorized_locations):
+        return {"passed": False, "reason": "authorized_locations contains an invalid location id."}
+
+    for field in ("password_hash", "salt", "iterations"):
+        if not user.get(field):
+            return {"passed": False, "reason": f"Missing {field}."}
+
+    return {"passed": True, "reason": "User record is valid."}
 
 
 def get_authorized_locations(user: dict[str, Any] | User, all_locations: list[Any]) -> list[Any]:

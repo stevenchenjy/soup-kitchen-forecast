@@ -23,6 +23,8 @@ def login_gate() -> None:
         password = st.text_input("Password", type="password")
         ok = st.form_submit_button("Login")
     if ok:
+        if username != username.strip():
+            st.warning("Username had leading or trailing spaces; trying the trimmed username.")
         user = authenticate_user(username.strip(), password)
         if user is None:
             st.error("Invalid username or password")

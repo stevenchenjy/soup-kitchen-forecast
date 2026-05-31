@@ -5,7 +5,17 @@ from pathlib import Path
 
 import streamlit as st
 
-from src.auth import authenticate_user, get_user, hash_password, load_users, require_role, save_users, validate_password
+from src.auth import (
+    authenticate_user,
+    delete_user,
+    get_user,
+    hash_password,
+    load_users,
+    require_role,
+    save_users,
+    validate_password,
+    validate_user_record,
+)
 from src.config import DATE_COL, TARGET_COL, artifact_dir_for_location, model_file_for_location
 from src.data_admin import delete_record, load_clean_data, save_clean_data, upsert_record
 from src.location_config import save_locations, list_locations
@@ -25,6 +35,8 @@ def login_gate() -> None:
         password = st.text_input("Password", type="password")
         ok = st.form_submit_button("Login")
     if ok:
+        if username != username.strip():
+            st.warning("Username had leading or trailing spaces; trying the trimmed username.")
         user = authenticate_user(username.strip(), password)
         if user is None:
             st.error("Invalid username or password")
@@ -265,11 +277,20 @@ def render_master_accounts(users):
     )
     with st.form("reset_admin_password"):
         reset_admin_password = st.text_input("New password", type="password")
+        admin_password_has_outer_space = reset_admin_password != reset_admin_password.strip()
+        if admin_password_has_outer_space:
+            st.warning("This password begins or ends with whitespace.")
+        confirm_admin_whitespace = st.checkbox(
+            "Save admin password with leading/trailing whitespace",
+            disabled=not admin_password_has_outer_space,
+        )
         reset_admin_ok = st.form_submit_button("Reset password")
     if reset_admin_ok:
         password_error = validate_password(reset_admin_password)
         if password_error:
             st.error(password_error)
+        elif admin_password_has_outer_space and not confirm_admin_whitespace:
+            st.error("Please confirm before saving a password with leading or trailing whitespace.")
         else:
             for account in users:
                 if account["username"] == reset_admin:
@@ -279,6 +300,36 @@ def render_master_accounts(users):
             save_users(users)
             st.success(f"Password reset for '{reset_admin}'.")
             st.rerun()
+
+    st.markdown("**Delete master/admin account**")
+    if len(master_users) <= 1:
+        st.info("At least one master/admin account must remain.")
+        return
+    current_username = user["username"]
+    deletable_admins = [account for account in master_users if account["username"] != current_username]
+    if not deletable_admins:
+        st.info("You cannot delete the currently logged-in account.")
+        return
+    with st.form("delete_admin_account"):
+        delete_admin = st.selectbox(
+            "Master/admin account to delete",
+            options=[account["username"] for account in deletable_admins],
+            key="admin_delete_account",
+        )
+        confirm_admin_delete = st.checkbox("I understand this will remove the account.")
+        delete_admin_ok = st.form_submit_button("Delete master/admin account")
+    if delete_admin_ok:
+        if delete_admin == current_username:
+            st.error("You cannot delete the currently logged-in account.")
+        elif len(master_users) <= 1:
+            st.error("At least one master/admin account must remain.")
+        elif not confirm_admin_delete:
+            st.error("Please confirm account deletion.")
+        elif delete_user(delete_admin):
+            st.success(f"Deleted master/admin account '{delete_admin}'.")
+            st.rerun()
+        else:
+            st.error("Account could not be found.")
 
 
 def render_staff_access():
@@ -388,11 +439,20 @@ def render_staff_access():
     )
     with st.form("reset_staff_password"):
         reset_password = st.text_input("New password", type="password")
+        staff_password_has_outer_space = reset_password != reset_password.strip()
+        if staff_password_has_outer_space:
+            st.warning("This password begins or ends with whitespace.")
+        confirm_staff_whitespace = st.checkbox(
+            "Save staff password with leading/trailing whitespace",
+            disabled=not staff_password_has_outer_space,
+        )
         reset_ok = st.form_submit_button("Reset password")
     if reset_ok:
         password_error = validate_password(reset_password)
         if password_error:
             st.error(password_error)
+        elif staff_password_has_outer_space and not confirm_staff_whitespace:
+            st.error("Please confirm before saving a password with leading or trailing whitespace.")
         else:
             for account in users:
                 if account["username"] == reset_staff:
@@ -402,6 +462,64 @@ def render_staff_access():
             save_users(users)
             st.success(f"Password reset for '{reset_staff}'.")
             st.rerun()
+
+    st.markdown("**Delete staff account**")
+    with st.form("delete_staff_account"):
+        delete_staff = st.selectbox(
+            "Staff account to delete",
+            options=[account["username"] for account in staff_users],
+            key="staff_delete_account",
+        )
+        confirm_staff_delete = st.checkbox("I understand this will remove the staff account.")
+        delete_staff_ok = st.form_submit_button("Delete staff account")
+    if delete_staff_ok:
+        if not confirm_staff_delete:
+            st.error("Please confirm account deletion.")
+        elif delete_user(delete_staff):
+            st.success(f"Deleted staff account '{delete_staff}'.")
+            st.rerun()
+        else:
+            st.error("Account could not be found.")
+
+
+def render_admin_diagnostics():
+    st.subheader("Admin Diagnostics")
+    users = load_users()
+    master_users = [account for account in users if require_role(account, {"master", "admin"})]
+    staff_users = [account for account in users if account["role"] == "staff"]
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Users", len(users))
+    c2.metric("Master accounts", len(master_users))
+    c3.metric("Staff accounts", len(staff_users))
+    c4.metric("Locations", len(locations))
+
+    location_ids = {loc.id for loc in locations}
+    rows = []
+    for account in users:
+        authorized_locations = account.get("authorized_locations", [])
+        account_type = "hashed" if all(account.get(field) for field in ("password_hash", "salt", "iterations")) else "plaintext"
+        validation = validate_user_record(account["username"])
+        if account["role"] == "master" and authorized_locations == ["*"]:
+            authorized_count = "all"
+            location_status = "OK"
+        else:
+            invalid_locations = [location_id for location_id in authorized_locations if location_id not in location_ids]
+            authorized_count = len(authorized_locations)
+            location_status = "OK" if not invalid_locations else f"Unknown: {', '.join(invalid_locations)}"
+        rows.append(
+            {
+                "Username": account["username"],
+                "Role": account["role"],
+                "Account type": account_type,
+                "Authorized locations count": authorized_count,
+                "Record check": "Pass" if validation["passed"] else "Fail",
+                "Reason": validation["reason"],
+                "Location IDs": location_status,
+            }
+        )
+
+    st.dataframe(rows, use_container_width=True, hide_index=True)
 
 
 def render_location_management():
@@ -487,7 +605,9 @@ def render_location_management():
 
 
 
-t1, t2, t3, t4, t5 = st.tabs(["Prediction", "Metrics", "Data Management", "Staff Access", "Location Management"])
+t1, t2, t3, t4, t5, t6 = st.tabs(
+    ["Prediction", "Metrics", "Data Management", "Staff Access", "Location Management", "Admin Diagnostics"]
+)
 with t1:
     render_prediction()
 with t2:
@@ -498,3 +618,5 @@ with t4:
     render_staff_access()
 with t5:
     render_location_management()
+with t6:
+    render_admin_diagnostics()

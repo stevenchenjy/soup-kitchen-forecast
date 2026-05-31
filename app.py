@@ -68,6 +68,13 @@ st.caption("Each location has independent database, model artifacts, and predict
 
 sidebar = st.sidebar
 sidebar.markdown(f"**User:** {user['username']} ({user['role']})")
+if not locations:
+    st.error("No locations are configured yet. Add a location before using the dashboard.")
+    if sidebar.button("Logout"):
+        st.session_state.clear()
+        st.rerun()
+    st.stop()
+
 selected_name = sidebar.selectbox("Location", options=list(loc_names.keys()))
 location_id = loc_names[selected_name]
 if sidebar.button("Logout"):

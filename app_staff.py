@@ -56,6 +56,11 @@ if not require_role(user, {"master", "staff"}):
     st.stop()
 
 all_locations = list_locations()
+if not all_locations:
+    st.title("Staff Meal Prep Assistant")
+    st.error("No locations are configured yet. Please contact a master user.")
+    st.stop()
+
 locations = get_authorized_locations(user, all_locations)
 loc_names = {loc.name: loc.id for loc in locations}
 
@@ -82,8 +87,12 @@ if sidebar.button("Logout"):
     st.rerun()
 
 model_path = model_file_for_location(location_id)
-if not model_path.exists():
-    st.warning(f"Model not found for location '{location_id}'.")
+df = load_clean_data(location_id)
+predictor = VisitorPredictor(str(model_path)) if model_path.exists() else None
+
+st.subheader(f"Daily Actions - {selected_name}")
+if predictor is None:
+    st.warning("Model not trained yet for this location.")
     if st.button("Train this location", type="primary"):
         with st.spinner("Training..."):
             r = subprocess.run([sys.executable, str(ROOT / "scripts" / "train_backtest.py"), "--location", location_id], cwd=ROOT)
@@ -92,20 +101,15 @@ if not model_path.exists():
             st.rerun()
         else:
             st.error("Training failed")
-    st.stop()
-
-predictor = VisitorPredictor(str(model_path))
-df = load_clean_data(location_id)
-
-st.subheader(f"Daily Actions - {selected_name}")
-buf = st.slider("Base meal buffer (%)", 0, 30, 8, 1)
-custom_date = st.text_input("Target service date (Saturday/Sunday, YYYY-MM-DD)", value="")
-if st.button("Get meal recommendation", type="primary"):
-    pred = predictor.predict_next(target_date=custom_date or None, meal_buffer_pct=buf / 100.0)
-    st.success(
-        f"Location: {location_id} | {pred.service_date:%Y-%m-%d} | Suggested meal prep: {pred.suggested_meals} "
-        f"(Point: {pred.predicted_visitors:.1f}, Quantile: {pred.predicted_quantile:.1f}, Residual: +{pred.residual_buffer:.1f})"
-    )
+else:
+    buf = st.slider("Base meal buffer (%)", 0, 30, 8, 1)
+    custom_date = st.text_input("Target service date (Saturday/Sunday, YYYY-MM-DD)", value="")
+    if st.button("Get meal recommendation", type="primary"):
+        pred = predictor.predict_next(target_date=custom_date or None, meal_buffer_pct=buf / 100.0)
+        st.success(
+            f"Location: {location_id} | {pred.service_date:%Y-%m-%d} | Suggested meal prep: {pred.suggested_meals} "
+            f"(Point: {pred.predicted_visitors:.1f}, Quantile: {pred.predicted_quantile:.1f}, Residual: +{pred.residual_buffer:.1f})"
+        )
 
 st.subheader("Quick Data Maintenance")
 add_date = st.date_input("Service date", value=None, key="staff_add_date")

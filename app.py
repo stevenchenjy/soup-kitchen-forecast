@@ -13,6 +13,7 @@ from src.auth import (
     load_users,
     require_role,
     save_users,
+    user_store_mode,
     validate_password,
     validate_user_record,
 )
@@ -77,6 +78,11 @@ loc_names = {loc.name: loc.id for loc in locations}
 
 st.title("Multi-Location Forecast Admin")
 st.caption("Each location has independent database, model artifacts, and prediction outputs")
+if user_store_mode() == "local_json":
+    st.warning(
+        "User accounts are using local data/users.json fallback. On Streamlit Cloud this is not shared between "
+        "separate admin and staff apps, so configure Supabase secrets before managing production accounts."
+    )
 
 sidebar = st.sidebar
 sidebar.markdown(f"**User:** {user['username']} ({user['role']})")
@@ -493,6 +499,7 @@ def render_admin_diagnostics():
     c2.metric("Master accounts", len(master_users))
     c3.metric("Staff accounts", len(staff_users))
     c4.metric("Locations", len(locations))
+    st.caption(f"User store: {user_store_mode()}")
 
     location_ids = {loc.id for loc in locations}
     rows = []

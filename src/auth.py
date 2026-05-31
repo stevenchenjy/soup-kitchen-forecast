@@ -3,16 +3,26 @@ from __future__ import annotations
 import json
 import hashlib
 import hmac
+import os
 from copy import deepcopy
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 import secrets
 from typing import Any
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+
+try:
+    import streamlit as st
+except ModuleNotFoundError:
+    st = None
 
 
 USERS_FILE = Path(__file__).resolve().parent.parent / "data" / "users.json"
 PASSWORD_ITERATIONS = 200_000
 PASSWORD_MIN_LENGTH = 8
+SUPABASE_TABLE_DEFAULT = "users"
 
 
 @dataclass
@@ -149,7 +159,116 @@ def ensure_users_file() -> None:
     save_users(deepcopy(DEFAULT_USERS))
 
 
-def load_users() -> list[dict[str, Any]]:
+def _secret_value(*names: str) -> str | None:
+    for name in names:
+        env_value = os.getenv(name)
+        if env_value:
+            return env_value
+
+    if st is None:
+        return None
+
+    try:
+        secrets_root = st.secrets
+    except Exception:
+        return None
+
+    for name in names:
+        try:
+            if name in secrets_root and secrets_root[name]:
+                return str(secrets_root[name])
+        except Exception:
+            pass
+
+    try:
+        supabase = secrets_root.get("supabase", {})
+    except Exception:
+        return None
+    for name in names:
+        key = name.lower()
+        if key.startswith("supabase_"):
+            key = key.removeprefix("supabase_")
+        try:
+            if key in supabase and supabase[key]:
+                return str(supabase[key])
+        except Exception:
+            pass
+    return None
+
+
+def _supabase_config() -> dict[str, str] | None:
+    url = _secret_value("SUPABASE_URL", "url")
+    key = _secret_value("SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_ANON_KEY", "service_role_key", "anon_key", "key")
+    table = _secret_value("SUPABASE_USERS_TABLE", "users_table") or SUPABASE_TABLE_DEFAULT
+    if not url or not key:
+        return None
+    return {
+        "url": url.rstrip("/"),
+        "key": key,
+        "table": table,
+    }
+
+
+def user_store_mode() -> str:
+    return "supabase" if _supabase_config() else "local_json"
+
+
+def _supabase_headers(extra: dict[str, str] | None = None) -> dict[str, str]:
+    config = _supabase_config()
+    if config is None:
+        raise RuntimeError("Supabase is not configured.")
+    headers = {
+        "apikey": config["key"],
+        "Authorization": f"Bearer {config['key']}",
+        "Content-Type": "application/json",
+    }
+    if extra:
+        headers.update(extra)
+    return headers
+
+
+def _supabase_url() -> str:
+    config = _supabase_config()
+    if config is None:
+        raise RuntimeError("Supabase is not configured.")
+    return f"{config['url']}/rest/v1/{config['table']}"
+
+
+def _supabase_request(
+    method: str,
+    params: dict[str, str] | None = None,
+    payload: Any | None = None,
+    extra_headers: dict[str, str] | None = None,
+) -> Any:
+    url = _supabase_url()
+    if params:
+        url = f"{url}?{urlencode(params)}"
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    request = Request(
+        url,
+        data=data,
+        headers=_supabase_headers(extra_headers),
+        method=method,
+    )
+    with urlopen(request, timeout=10) as response:
+        body = response.read().decode("utf-8")
+    return json.loads(body) if body else None
+
+
+def _normalize_users(users: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized_users: list[dict[str, Any]] = []
+    for row in users:
+        user = _normalize_user(row)
+        if user is not None:
+            if "password" in user:
+                password = user.pop("password")
+                if password:
+                    user.update(hash_password(password, validate=False))
+            normalized_users.append(user)
+    return normalized_users
+
+
+def _load_users_from_json() -> list[dict[str, Any]]:
     ensure_users_file()
     payload = json.loads(USERS_FILE.read_text(encoding="utf-8"))
     raw_users = payload.get("users", payload) if isinstance(payload, dict) else payload
@@ -165,23 +284,82 @@ def load_users() -> list[dict[str, Any]]:
     return users
 
 
+def _save_users_to_json(users: list[dict[str, Any]]) -> None:
+    USERS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"users": _normalize_users(users)}
+    USERS_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _load_users_from_supabase() -> list[dict[str, Any]]:
+    rows = _supabase_request(
+        "GET",
+        params={
+            "select": "username,role,authorized_locations,password_hash,salt,iterations",
+            "order": "username.asc",
+        },
+    )
+    if not isinstance(rows, list):
+        return []
+    users: list[dict[str, Any]] = []
+    for row in rows:
+        if isinstance(row, dict):
+            user = _normalize_user(row)
+            if user is not None:
+                users.append(user)
+    return users
+
+
+def _save_users_to_supabase(users: list[dict[str, Any]]) -> None:
+    normalized_users = _normalize_users(users)
+    existing_users = _load_users_from_supabase()
+    incoming_usernames = {user["username"].lower() for user in normalized_users}
+    now = datetime.now(timezone.utc).isoformat()
+
+    if normalized_users:
+        rows = [
+            {
+                "username": user["username"],
+                "role": user["role"],
+                "authorized_locations": user.get("authorized_locations", []),
+                "password_hash": user.get("password_hash"),
+                "salt": user.get("salt"),
+                "iterations": user.get("iterations"),
+                "updated_at": now,
+            }
+            for user in normalized_users
+        ]
+        _supabase_request(
+            "POST",
+            params={"on_conflict": "username"},
+            payload=rows,
+            extra_headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
+        )
+
+    for user in existing_users:
+        if user["username"].lower() in incoming_usernames:
+            continue
+        _supabase_request(
+            "DELETE",
+            params={"username": f"eq.{user['username']}"},
+            extra_headers={"Prefer": "return=minimal"},
+        )
+
+
+def load_users() -> list[dict[str, Any]]:
+    if _supabase_config():
+        return _load_users_from_supabase()
+    return _load_users_from_json()
+
+
 def _same_username(left: str, right: str) -> bool:
     return left.strip().lower() == right.strip().lower()
 
 
 def save_users(users: list[dict[str, Any]]) -> None:
-    USERS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    normalized_users: list[dict[str, Any]] = []
-    for row in users:
-        user = _normalize_user(row)
-        if user is not None:
-            if "password" in user:
-                password = user.pop("password")
-                if password:
-                    user.update(hash_password(password, validate=False))
-            normalized_users.append(user)
-    payload = {"users": normalized_users}
-    USERS_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    if _supabase_config():
+        _save_users_to_supabase(users)
+        return
+    _save_users_to_json(users)
 
 
 def get_user(username: str) -> dict[str, Any] | None:

@@ -8,7 +8,7 @@ import streamlit as st
 from src.auth import authenticate_user, get_user, load_users, require_role, save_users
 from src.config import DATE_COL, TARGET_COL, artifact_dir_for_location, model_file_for_location
 from src.data_admin import delete_record, load_clean_data, save_clean_data, upsert_record
-from src.location_config import list_locations
+from src.location_config import save_locations, list_locations
 from src.predictor import VisitorPredictor
 
 ROOT = Path(__file__).resolve().parent
@@ -301,8 +301,90 @@ def render_staff_access():
             st.rerun()
 
 
+def render_location_management():
+    st.subheader("Locations")
+    rows = [
+        {
+            "id": loc.id,
+            "name": loc.name,
+            "zip_code": loc.zip_code,
+            "country_code": loc.country_code,
+            "timezone": loc.timezone,
+        }
+        for loc in locations
+    ]
+    st.dataframe(rows, use_container_width=True, hide_index=True)
 
-t1, t2, t3, t4 = st.tabs(["Prediction", "Metrics", "Data Management", "Staff Access"])
+    st.markdown("**Add location**")
+    with st.form("add_location"):
+        new_id = st.text_input("Location ID")
+        new_name = st.text_input("Name")
+        new_zip = st.text_input("Zip code")
+        new_country = st.text_input("Country code", value="US")
+        new_timezone = st.text_input("Timezone", value="America/New_York")
+        add_ok = st.form_submit_button("Add location")
+    if add_ok:
+        new_location = {
+            "id": new_id.strip(),
+            "name": new_name.strip(),
+            "zip_code": new_zip.strip(),
+            "country_code": new_country.strip() or "US",
+            "timezone": new_timezone.strip() or "America/New_York",
+        }
+        if not new_location["id"]:
+            st.error("Please enter a location ID.")
+        elif not new_location["name"]:
+            st.error("Please enter a location name.")
+        elif not new_location["zip_code"]:
+            st.error("Please enter a zip code.")
+        elif any(loc.id == new_location["id"] for loc in locations):
+            st.error("That location ID already exists.")
+        else:
+            save_locations(rows + [new_location])
+            st.success(f"Added location '{new_location['id']}'.")
+            st.rerun()
+
+    if not locations:
+        return
+
+    st.markdown("**Edit location**")
+    selected_location_id = st.selectbox(
+        "Location to edit",
+        options=[loc.id for loc in locations],
+        format_func=lambda loc_id: next((loc.name for loc in locations if loc.id == loc_id), loc_id),
+        key="edit_location_id",
+    )
+    selected_location = next(loc for loc in locations if loc.id == selected_location_id)
+    with st.form("edit_location"):
+        edit_name = st.text_input("Name", value=selected_location.name)
+        edit_zip = st.text_input("Zip code", value=selected_location.zip_code)
+        edit_country = st.text_input("Country code", value=selected_location.country_code)
+        edit_timezone = st.text_input("Timezone", value=selected_location.timezone)
+        edit_ok = st.form_submit_button("Save location")
+    if edit_ok:
+        if not edit_name.strip():
+            st.error("Please enter a location name.")
+        elif not edit_zip.strip():
+            st.error("Please enter a zip code.")
+        else:
+            updated_rows = []
+            for row in rows:
+                if row["id"] == selected_location_id:
+                    row = {
+                        "id": selected_location_id,
+                        "name": edit_name.strip(),
+                        "zip_code": edit_zip.strip(),
+                        "country_code": edit_country.strip() or "US",
+                        "timezone": edit_timezone.strip() or "America/New_York",
+                    }
+                updated_rows.append(row)
+            save_locations(updated_rows)
+            st.success(f"Updated location '{selected_location_id}'.")
+            st.rerun()
+
+
+
+t1, t2, t3, t4, t5 = st.tabs(["Prediction", "Metrics", "Data Management", "Staff Access", "Location Management"])
 with t1:
     render_prediction()
 with t2:
@@ -311,3 +393,5 @@ with t3:
     render_data_ops()
 with t4:
     render_staff_access()
+with t5:
+    render_location_management()

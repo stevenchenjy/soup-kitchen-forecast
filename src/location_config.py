@@ -72,6 +72,38 @@ def list_locations() -> list[Location]:
 
 
 
+def save_locations(locations: list[Location | dict]) -> None:
+    LOCATIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"locations": []}
+    for loc in locations:
+        if isinstance(loc, Location):
+            row = {
+                "id": loc.id,
+                "name": loc.name,
+                "zip_code": loc.zip_code,
+                "country_code": loc.country_code,
+                "timezone": loc.timezone,
+            }
+        else:
+            row = {
+                "id": str(loc.get("id", "")).strip(),
+                "name": str(loc.get("name", "")).strip(),
+                "zip_code": str(loc.get("zip_code", "")).strip(),
+                "country_code": str(loc.get("country_code", "US")).strip() or "US",
+                "timezone": str(loc.get("timezone", "America/New_York")).strip() or "America/New_York",
+            }
+        if not row["id"]:
+            continue
+        if not row["name"]:
+            row["name"] = row["id"]
+        if not row["zip_code"]:
+            row["zip_code"] = "12550"
+        payload["locations"].append(row)
+
+    LOCATIONS_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+
 def get_location(location_id: str) -> Location:
     for loc in list_locations():
         if loc.id == location_id:

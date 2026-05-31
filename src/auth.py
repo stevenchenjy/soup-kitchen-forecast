@@ -1,22 +1,38 @@
 from __future__ import annotations
 
+import json
+from copy import deepcopy
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+
+USERS_FILE = Path(__file__).resolve().parent.parent / "data" / "users.json"
 
 
 @dataclass
 class User:
     username: str
     role: str
+    authorized_locations: list[str]
 
 
-USERS = {
-    "admin": {"password": "VeryStrongAdmin2026", "role": "admin"},
-    "staff": {"password": "SoupKitchenStaff2026", "role": "staff"},
-}
+DEFAULT_USERS = [
+    {
+        "username": "admin",
+        "password": "VeryStrongAdmin2026",
+        "role": "master",
+        "authorized_locations": ["*"],
+    },
+    {
+        "username": "staff",
+        "password": "SoupKitchenStaff2026",
+        "role": "staff",
+        "authorized_locations": ["ny_12550"],
+    },
+]
 
 
-<<<<<<< Updated upstream
-=======
 def _normalize_role(role: str) -> str:
     role = str(role).strip().lower()
     if role == "admin":
@@ -116,7 +132,7 @@ def authenticate_user(username: str, password: str) -> dict[str, Any] | None:
 def get_authorized_locations(user: dict[str, Any] | User, all_locations: list[Any]) -> list[Any]:
     role = _normalize_role(_user_value(user, "role", "staff"))
     authorized_locations = _normalize_authorized_locations(_user_value(user, "authorized_locations", []), role)
-    if role == "master" or "*" in authorized_locations:
+    if role == "master":
         return list(all_locations)
     authorized_ids = set(authorized_locations)
     return [location for location in all_locations if getattr(location, "id", None) in authorized_ids]
@@ -127,12 +143,14 @@ def require_role(user: dict[str, Any] | User, allowed_roles: set[str]) -> bool:
     allowed = {_normalize_role(allowed_role) for allowed_role in allowed_roles}
     return role in allowed
 
->>>>>>> Stashed changes
 
 def authenticate(username: str, password: str) -> User | None:
-    row = USERS.get(username)
-    if not row:
+    user = authenticate_user(username, password)
+    if user is None:
         return None
-    if row["password"] != password:
-        return None
-    return User(username=username, role=row["role"])
+    role = "admin" if user["role"] == "master" else user["role"]
+    return User(
+        username=user["username"],
+        role=role,
+        authorized_locations=user["authorized_locations"],
+    )

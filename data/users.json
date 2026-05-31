@@ -1,0 +1,20 @@
+{
+  "users": [
+    {
+      "username": "admin",
+      "password": "VeryStrongAdmin2026",
+      "role": "master",
+      "authorized_locations": [
+        "*"
+      ]
+    },
+    {
+      "username": "staff",
+      "password": "SoupKitchenStaff2026",
+      "role": "staff",
+      "authorized_locations": [
+        "ny_12550"
+      ]
+    }
+  ]
+}

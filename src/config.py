@@ -7,6 +7,7 @@ WEATHER_DATA_FILE = PROJECT_ROOT / "data" / "weather_daily_12550.csv"
 MODEL_FILE = PROJECT_ROOT / "models" / "visitor_model.joblib"
 ARTIFACT_DIR = PROJECT_ROOT / "artifacts"
 LOCATIONS_FILE = PROJECT_ROOT / "data" / "locations.json"
+USERS_FILE = PROJECT_ROOT / "data" / "users.json"
 LOCATIONS_ROOT = PROJECT_ROOT / "data" / "locations"
 
 ZIP_CODE = "12550"

@@ -1,7 +1,7 @@
 # Visitor Forecasting and Meal Prep Assistant (Multi-Location)
 
 ## Overview
-- Login and role-based access (`admin` / `staff`)
+- Login and role-based access (`master` / `staff`)
 - Switch locations after login
 - Per-location isolated storage:
   - SQLite database: `data/locations/<location_id>/attendance.db`
@@ -12,8 +12,8 @@
 - Separate Saturday/Sunday modeling and backtesting
 
 ## Default Accounts
-- `admin / admin123`
-- `staff / staff123`
+- `admin / VeryStrongAdmin2026` (master)
+- `staff / SoupKitchenStaff2026` (staff, authorized for `ny_12550`)
 
 ## 1) Environment Setup
 ```bash

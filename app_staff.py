@@ -4,7 +4,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from src.auth import authenticate
+from src.auth import authenticate_user, get_authorized_locations, get_user, require_role
 from src.config import TARGET_COL, model_file_for_location
 from src.data_admin import delete_record, load_clean_data, upsert_record
 from src.location_config import list_locations
@@ -23,24 +23,40 @@ def login_gate() -> None:
         password = st.text_input("Password", type="password")
         ok = st.form_submit_button("Login")
     if ok:
-        user = authenticate(username.strip(), password)
+        user = authenticate_user(username.strip(), password)
         if user is None:
             st.error("Invalid username or password")
         else:
-            st.session_state["user"] = {"username": user.username, "role": user.role}
+            st.session_state["user"] = {"username": user["username"]}
             st.rerun()
     st.stop()
+
+
+def load_current_user() -> dict | None:
+    stored_user = st.session_state.get("user", {})
+    if not isinstance(stored_user, dict):
+        return None
+    username = str(stored_user.get("username", "")).strip()
+    if not username:
+        return None
+    return get_user(username)
 
 
 if "user" not in st.session_state:
     login_gate()
 
-user = st.session_state["user"]
-if user["role"] not in {"admin", "staff"}:
+user = load_current_user()
+if user is None:
+    st.session_state.clear()
+    st.error("Your account is no longer available. Please log in again.")
+    login_gate()
+
+if not require_role(user, {"master", "staff"}):
     st.error("No permission.")
     st.stop()
 
-locations = list_locations()
+all_locations = list_locations()
+locations = get_authorized_locations(user, all_locations)
 loc_names = {loc.name: loc.id for loc in locations}
 
 st.title("Staff Meal Prep Assistant")
@@ -48,8 +64,19 @@ st.caption("Per-location view with independent data/model storage")
 
 sidebar = st.sidebar
 sidebar.markdown(f"**User:** {user['username']} ({user['role']})")
+if not locations:
+    st.error("No authorized locations are assigned to your account. Please contact a master user.")
+    if sidebar.button("Logout"):
+        st.session_state.clear()
+        st.rerun()
+    st.stop()
+
 selected_name = sidebar.selectbox("Location", options=list(loc_names.keys()))
 location_id = loc_names[selected_name]
+if location_id not in {loc.id for loc in locations}:
+    st.error("You are not authorized to access this location.")
+    st.stop()
+
 if sidebar.button("Logout"):
     st.session_state.clear()
     st.rerun()

@@ -130,7 +130,7 @@ def authenticate_user(username: str, password: str) -> dict[str, Any] | None:
 def get_authorized_locations(user: dict[str, Any] | User, all_locations: list[Any]) -> list[Any]:
     role = _normalize_role(_user_value(user, "role", "staff"))
     authorized_locations = _normalize_authorized_locations(_user_value(user, "authorized_locations", []), role)
-    if role == "master" or "*" in authorized_locations:
+    if role == "master":
         return list(all_locations)
     authorized_ids = set(authorized_locations)
     return [location for location in all_locations if getattr(location, "id", None) in authorized_ids]

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from src.auth import authenticate
+from src.auth import authenticate_user, get_user, load_users, require_role, save_users
 from src.config import DATE_COL, TARGET_COL, artifact_dir_for_location, model_file_for_location
 from src.data_admin import delete_record, load_clean_data, save_clean_data, upsert_record
 from src.location_config import list_locations
@@ -25,21 +25,36 @@ def login_gate() -> None:
         password = st.text_input("Password", type="password")
         ok = st.form_submit_button("Login")
     if ok:
-        user = authenticate(username.strip(), password)
+        user = authenticate_user(username.strip(), password)
         if user is None:
             st.error("Invalid username or password")
         else:
-            st.session_state["user"] = {"username": user.username, "role": user.role}
+            st.session_state["user"] = {"username": user["username"]}
             st.rerun()
     st.stop()
+
+
+def load_current_user() -> dict | None:
+    stored_user = st.session_state.get("user", {})
+    if not isinstance(stored_user, dict):
+        return None
+    username = str(stored_user.get("username", "")).strip()
+    if not username:
+        return None
+    return get_user(username)
 
 
 if "user" not in st.session_state:
     login_gate()
 
-user = st.session_state["user"]
-if user["role"] not in {"admin"}:
-    st.error("Admin role required for this dashboard.")
+user = load_current_user()
+if user is None:
+    st.session_state.clear()
+    st.error("Your account is no longer available. Please log in again.")
+    login_gate()
+
+if not require_role(user, {"master", "admin"}):
+    st.error("Master/admin role required for this dashboard.")
     if st.button("Logout"):
         st.session_state.clear()
         st.rerun()
@@ -61,25 +76,27 @@ if sidebar.button("Logout"):
 
 model_path = model_file_for_location(location_id)
 artifact_dir = artifact_dir_for_location(location_id)
-
-if not model_path.exists():
-    st.warning(f"Model not found for location '{location_id}'. Train this location first.")
-    if st.button("Train this location", type="primary"):
-        with st.spinner("Training..."):
-            r = subprocess.run([sys.executable, str(ROOT / "scripts" / "train_backtest.py"), "--location", location_id], cwd=ROOT)
-        if r.returncode == 0:
-            st.success("Training completed")
-            st.rerun()
-        else:
-            st.error("Training failed")
-    st.stop()
-
-predictor = VisitorPredictor(str(model_path))
+predictor = VisitorPredictor(str(model_path)) if model_path.exists() else None
 
 
 
 def render_prediction():
     st.subheader(f"Prediction - {selected_name}")
+    if predictor is None:
+        st.warning(f"Model not found for location '{location_id}'. Train this location first.")
+        if st.button("Train this location", type="primary"):
+            with st.spinner("Training..."):
+                r = subprocess.run(
+                    [sys.executable, str(ROOT / "scripts" / "train_backtest.py"), "--location", location_id],
+                    cwd=ROOT,
+                )
+            if r.returncode == 0:
+                st.success("Training completed")
+                st.rerun()
+            else:
+                st.error("Training failed")
+        return
+
     c1, c2 = st.columns(2)
     with c1:
         buffer_pct = st.slider("Base meal buffer (%)", min_value=0, max_value=30, value=8, step=1)
@@ -187,11 +204,110 @@ def render_data_ops():
             st.error("Training failed.")
 
 
+def render_staff_access():
+    st.subheader("Staff Accounts")
+    users = load_users()
+    location_ids = [loc.id for loc in locations]
+    locations_by_id = {loc.id: loc for loc in locations}
 
-t1, t2, t3 = st.tabs(["Prediction", "Metrics", "Data Management"])
+    def location_label(location_id: str) -> str:
+        loc = locations_by_id.get(location_id)
+        return f"{loc.name} ({location_id})" if loc else location_id
+
+    staff_users = [account for account in users if account["role"] == "staff"]
+    if staff_users:
+        rows = []
+        for account in staff_users:
+            assigned_locations = account.get("authorized_locations", [])
+            rows.append(
+                {
+                    "Username": account["username"],
+                    "Authorized locations": ", ".join(location_label(location_id) for location_id in assigned_locations)
+                    or "None",
+                }
+            )
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+    else:
+        st.info("No staff accounts have been created yet.")
+
+    st.markdown("**Create staff account**")
+    with st.form("create_staff_account"):
+        new_username = st.text_input("New username")
+        new_password = st.text_input("New password", type="password")
+        new_locations = st.multiselect(
+            "Authorized locations",
+            options=location_ids,
+            format_func=location_label,
+            key="new_staff_locations",
+        )
+        create_ok = st.form_submit_button("Create staff account")
+    if create_ok:
+        new_username = new_username.strip()
+        if not new_username:
+            st.error("Please enter a username.")
+        elif not new_password:
+            st.error("Please enter a password.")
+        elif not new_locations:
+            st.error("Please assign at least one location.")
+        elif any(account["username"].lower() == new_username.lower() for account in users):
+            st.error("That username already exists.")
+        else:
+            users.append(
+                {
+                    "username": new_username,
+                    "password": new_password,
+                    "role": "staff",
+                    "authorized_locations": new_locations,
+                }
+            )
+            save_users(users)
+            st.success(f"Created staff account '{new_username}'.")
+            st.rerun()
+
+    if not staff_users:
+        return
+
+    st.markdown("**Update staff location access**")
+    selected_staff = st.selectbox(
+        "Staff account",
+        options=[account["username"] for account in staff_users],
+        key="staff_access_account",
+    )
+    selected_account = next(account for account in staff_users if account["username"] == selected_staff)
+    current_locations = [
+        location_id
+        for location_id in selected_account.get("authorized_locations", [])
+        if location_id in locations_by_id
+    ]
+    with st.form("update_staff_access"):
+        updated_locations = st.multiselect(
+            "Authorized locations",
+            options=location_ids,
+            default=current_locations,
+            format_func=location_label,
+            key="updated_staff_locations",
+        )
+        update_ok = st.form_submit_button("Save staff access")
+    if update_ok:
+        if not updated_locations:
+            st.error("Please assign at least one location.")
+        else:
+            for account in users:
+                if account["username"] == selected_staff:
+                    account["authorized_locations"] = updated_locations
+                    break
+            save_users(users)
+            st.success(f"Updated location access for '{selected_staff}'.")
+            st.rerun()
+
+
+
+t1, t2, t3, t4 = st.tabs(["Prediction", "Metrics", "Data Management", "Staff Access"])
 with t1:
     render_prediction()
 with t2:
     render_metrics()
 with t3:
     render_data_ops()
+with t4:
+    render_staff_access()

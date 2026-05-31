@@ -5,7 +5,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from src.auth import authenticate_user, get_user, load_users, require_role, save_users
+from src.auth import authenticate_user, get_user, hash_password, load_users, require_role, save_users, validate_password
 from src.config import DATE_COL, TARGET_COL, artifact_dir_for_location, model_file_for_location
 from src.data_admin import delete_record, load_clean_data, save_clean_data, upsert_record
 from src.location_config import save_locations, list_locations
@@ -243,10 +243,11 @@ def render_staff_access():
         create_ok = st.form_submit_button("Create staff account")
     if create_ok:
         new_username = new_username.strip()
+        password_error = validate_password(new_password)
         if not new_username:
             st.error("Please enter a username.")
-        elif not new_password:
-            st.error("Please enter a password.")
+        elif password_error:
+            st.error(password_error)
         elif not new_locations:
             st.error("Please assign at least one location.")
         elif any(account["username"].lower() == new_username.lower() for account in users):
@@ -255,9 +256,9 @@ def render_staff_access():
             users.append(
                 {
                     "username": new_username,
-                    "password": new_password,
                     "role": "staff",
                     "authorized_locations": new_locations,
+                    **hash_password(new_password),
                 }
             )
             save_users(users)
@@ -298,6 +299,29 @@ def render_staff_access():
                     break
             save_users(users)
             st.success(f"Updated location access for '{selected_staff}'.")
+            st.rerun()
+
+    st.markdown("**Reset staff password**")
+    reset_staff = st.selectbox(
+        "Staff account",
+        options=[account["username"] for account in staff_users],
+        key="staff_password_reset_account",
+    )
+    with st.form("reset_staff_password"):
+        reset_password = st.text_input("New password", type="password")
+        reset_ok = st.form_submit_button("Reset password")
+    if reset_ok:
+        password_error = validate_password(reset_password)
+        if password_error:
+            st.error(password_error)
+        else:
+            for account in users:
+                if account["username"] == reset_staff:
+                    account.pop("password", None)
+                    account.update(hash_password(reset_password))
+                    break
+            save_users(users)
+            st.success(f"Password reset for '{reset_staff}'.")
             st.rerun()
 
 

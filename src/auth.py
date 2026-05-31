@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import hmac
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
+import secrets
 from typing import Any
 
 
 USERS_FILE = Path(__file__).resolve().parent.parent / "data" / "users.json"
+PASSWORD_ITERATIONS = 200_000
+PASSWORD_MIN_LENGTH = 8
 
 
 @dataclass
@@ -52,17 +57,75 @@ def _normalize_authorized_locations(value: Any, role: str) -> list[str]:
     return [str(location_id).strip() for location_id in value if str(location_id).strip()]
 
 
+def validate_password(password: str) -> str | None:
+    if not password:
+        return "Please enter a password."
+    if len(password) < PASSWORD_MIN_LENGTH:
+        return f"Password must be at least {PASSWORD_MIN_LENGTH} characters."
+    return None
+
+
+def hash_password(password: str, iterations: int = PASSWORD_ITERATIONS, validate: bool = True) -> dict[str, Any]:
+    if validate:
+        error = validate_password(password)
+        if error:
+            raise ValueError(error)
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        bytes.fromhex(salt),
+        iterations,
+    )
+    return {
+        "password_hash": digest.hex(),
+        "salt": salt,
+        "iterations": iterations,
+    }
+
+
+def _verify_password(password: str, user: dict[str, Any]) -> bool:
+    password_hash = user.get("password_hash")
+    salt = user.get("salt")
+    iterations = user.get("iterations")
+    if not password_hash or not salt or not iterations:
+        return False
+    try:
+        digest = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            bytes.fromhex(str(salt)),
+            int(iterations),
+        )
+    except (TypeError, ValueError):
+        return False
+    return hmac.compare_digest(digest.hex(), str(password_hash))
+
+
+def _set_password_hash(user: dict[str, Any], password: str) -> dict[str, Any]:
+    out = dict(user)
+    out.pop("password", None)
+    out.update(hash_password(password, validate=False))
+    return out
+
+
 def _normalize_user(row: dict[str, Any]) -> dict[str, Any] | None:
     username = str(row.get("username", "")).strip()
     if not username:
         return None
     role = _normalize_role(row.get("role", "staff"))
-    return {
+    user = {
         "username": username,
-        "password": str(row.get("password", "")),
         "role": role,
         "authorized_locations": _normalize_authorized_locations(row.get("authorized_locations", []), role),
     }
+    if row.get("password_hash") and row.get("salt") and row.get("iterations"):
+        user["password_hash"] = str(row["password_hash"])
+        user["salt"] = str(row["salt"])
+        user["iterations"] = int(row["iterations"])
+    elif "password" in row:
+        user["password"] = str(row.get("password", ""))
+    return user
 
 
 def _public_user(user: dict[str, Any]) -> dict[str, Any]:
@@ -108,6 +171,10 @@ def save_users(users: list[dict[str, Any]]) -> None:
     for row in users:
         user = _normalize_user(row)
         if user is not None:
+            if "password" in user:
+                password = user.pop("password")
+                if password:
+                    user.update(hash_password(password, validate=False))
             normalized_users.append(user)
     payload = {"users": normalized_users}
     USERS_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -123,9 +190,17 @@ def get_user(username: str) -> dict[str, Any] | None:
 
 def authenticate_user(username: str, password: str) -> dict[str, Any] | None:
     username = username.strip()
-    for user in load_users():
-        if user["username"] == username and user["password"] == password:
+    users = load_users()
+    for index, user in enumerate(users):
+        if user["username"] != username:
+            continue
+        if _verify_password(password, user):
             return _public_user(user)
+        if user.get("password") == password:
+            migrated_user = _set_password_hash(user, password)
+            users[index] = migrated_user
+            save_users(users)
+            return _public_user(migrated_user)
     return None
 
 

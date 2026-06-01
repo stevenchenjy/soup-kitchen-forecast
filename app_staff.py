@@ -1,7 +1,3 @@
-import subprocess
-import sys
-from pathlib import Path
-
 import streamlit as st
 
 from src.auth import authenticate_user, get_authorized_locations, get_user, require_role
@@ -12,12 +8,10 @@ from src.config import (
     TARGET_COL,
     model_file_for_location,
 )
-from src.data_admin import delete_record, load_clean_data, upsert_record
+from src.data_admin import load_clean_data, upsert_record
 from src.location_config import list_locations
 from src.prediction_logs import save_prediction_log, update_prediction_logs_with_actual
 from src.predictor import VisitorPredictor
-
-ROOT = Path(__file__).resolve().parent
 
 st.set_page_config(page_title="Staff Meal Prep Assistant", layout="centered")
 
@@ -101,15 +95,7 @@ predictor = VisitorPredictor(str(model_path)) if model_path.exists() else None
 
 st.subheader(f"Daily Actions - {selected_name}")
 if predictor is None:
-    st.warning("Model not trained yet for this location.")
-    if st.button("Train this location", type="primary"):
-        with st.spinner("Training..."):
-            r = subprocess.run([sys.executable, str(ROOT / "scripts" / "train_backtest.py"), "--location", location_id], cwd=ROOT)
-        if r.returncode == 0:
-            st.success("Training completed")
-            st.rerun()
-        else:
-            st.error("Training failed")
+    st.warning("Forecast is not ready for this location. Please contact an admin.")
 else:
     buf = st.slider(
         "Extra meals safety buffer (%)",
@@ -122,15 +108,15 @@ else:
     custom_date = st.text_input("Target service date (Saturday/Sunday, YYYY-MM-DD)", value="")
     if st.button("Get meal recommendation", type="primary"):
         pred = predictor.predict_next(target_date=custom_date or None, meal_buffer_pct=buf / 100.0)
-        st.success(
-            f"Location: {location_id} | {pred.service_date:%Y-%m-%d} | Suggested meal prep: {pred.suggested_meals} "
-            f"(Point: {pred.predicted_visitors:.1f}, Quantile: {pred.predicted_quantile:.1f}, Residual: +{pred.residual_buffer:.1f})"
-        )
+        st.success(f"Recommendation ready for {pred.service_date:%Y-%m-%d}.")
         estimated_food_saved = pred.suggested_meals * ESTIMATED_WASTE_REDUCTION_RATE
         estimated_carbon_reduced = estimated_food_saved * MEAL_WEIGHT_KG * KG_CO2E_PER_KG_FOOD_WASTE
         c1, c2 = st.columns(2)
-        c1.metric("Estimated Food Saved", f"{estimated_food_saved:.1f} meals of food")
-        c2.metric("Estimated Carbon Reduced", f"{estimated_carbon_reduced:.1f} kg CO2e")
+        c1.metric("Recommended Meals", f"{pred.suggested_meals}")
+        c2.metric("Expected Visitors", f"{pred.predicted_visitors:.1f}")
+        c3, c4 = st.columns(2)
+        c3.metric("Estimated Food Saved", f"{estimated_food_saved:.1f} meals of food")
+        c4.metric("Estimated Carbon Reduced", f"{estimated_carbon_reduced:.1f} kg CO2e")
         st.caption(
             f"These are planning estimates based on a {ESTIMATED_WASTE_REDUCTION_RATE:.0%} "
             "waste-reduction assumption."
@@ -140,9 +126,9 @@ else:
         except Exception:
             st.warning("Prediction was generated, but monitoring log could not be saved.")
 
-st.subheader("Quick Data Maintenance")
+st.subheader("After Service")
 add_date = st.date_input("Service date", value=None, key="staff_add_date")
-add_visitors = st.number_input("Visitors", min_value=0, max_value=10000, value=120, step=1)
+add_visitors = st.number_input("Actual visitors served", min_value=0, max_value=10000, value=120, step=1)
 if st.button("Add / Update"):
     if add_date is not None:
         upsert_record(str(add_date), int(add_visitors), location_id)
@@ -157,19 +143,7 @@ if st.button("Add / Update"):
             st.rerun()
 
 if not df.empty:
-    del_options = [d.strftime("%Y-%m-%d") for d in df["service_date"].sort_values()]
-    del_date = st.selectbox("Delete date", options=del_options)
-    if st.button("Delete"):
-        delete_record(del_date, location_id)
-        st.success("Deleted.")
-        st.rerun()
-
-st.dataframe(df[["service_date", TARGET_COL]], use_container_width=True, height=300)
-
-if st.button("Incremental retraining", type="primary"):
-    with st.spinner("Training..."):
-        r = subprocess.run([sys.executable, str(ROOT / "scripts" / "retrain_incremental.py"), "--location", location_id], cwd=ROOT)
-    if r.returncode == 0:
-        st.success("Training completed.")
-    else:
-        st.error("Training failed.")
+    st.markdown("**Recent visitor counts**")
+    recent_df = df[["service_date", TARGET_COL]].sort_values("service_date", ascending=False).head(10)
+    recent_df = recent_df.rename(columns={"service_date": "Service date", TARGET_COL: "Actual visitors served"})
+    st.dataframe(recent_df, use_container_width=True, hide_index=True, height=300)

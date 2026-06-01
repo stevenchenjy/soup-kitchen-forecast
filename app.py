@@ -18,7 +18,7 @@ from src.auth import (
     validate_user_record,
 )
 from src.config import DATE_COL, ESTIMATED_WASTE_REDUCTION_RATE, TARGET_COL, artifact_dir_for_location, model_file_for_location
-from src.data_admin import delete_record, load_clean_data, save_clean_data, upsert_record
+from src.data_admin import attendance_store_mode, delete_record, load_clean_data, save_clean_data, upsert_record
 from src.location_config import save_locations, list_locations
 from src.prediction_logs import (
     load_prediction_logs,
@@ -576,6 +576,7 @@ def render_admin_diagnostics():
     c3.metric("Staff accounts", len(staff_users))
     c4.metric("Locations", len(locations))
     st.caption(f"User store: {user_store_mode()}")
+    st.caption(f"Attendance store: {attendance_store_mode()}")
 
     location_ids = {loc.id for loc in locations}
     rows = []

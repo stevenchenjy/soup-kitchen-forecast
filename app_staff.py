@@ -8,6 +8,7 @@ from src.auth import authenticate_user, get_authorized_locations, get_user, requ
 from src.config import TARGET_COL, model_file_for_location
 from src.data_admin import delete_record, load_clean_data, upsert_record
 from src.location_config import list_locations
+from src.prediction_logs import save_prediction_log, update_prediction_logs_with_actual
 from src.predictor import VisitorPredictor
 
 ROOT = Path(__file__).resolve().parent
@@ -112,6 +113,10 @@ else:
             f"Location: {location_id} | {pred.service_date:%Y-%m-%d} | Suggested meal prep: {pred.suggested_meals} "
             f"(Point: {pred.predicted_visitors:.1f}, Quantile: {pred.predicted_quantile:.1f}, Residual: +{pred.residual_buffer:.1f})"
         )
+        try:
+            save_prediction_log(location_id, pred, created_by=user["username"], source_app="staff")
+        except Exception:
+            st.warning("Prediction was generated, but monitoring log could not be saved.")
 
 st.subheader("Quick Data Maintenance")
 add_date = st.date_input("Service date", value=None, key="staff_add_date")
@@ -119,8 +124,15 @@ add_visitors = st.number_input("Visitors", min_value=0, max_value=10000, value=1
 if st.button("Add / Update"):
     if add_date is not None:
         upsert_record(str(add_date), int(add_visitors), location_id)
+        monitoring_updated = True
+        try:
+            update_prediction_logs_with_actual(location_id, str(add_date), int(add_visitors))
+        except Exception:
+            monitoring_updated = False
+            st.warning("Attendance was saved, but monitoring log could not be updated.")
         st.success("Saved.")
-        st.rerun()
+        if monitoring_updated:
+            st.rerun()
 
 if not df.empty:
     del_options = [d.strftime("%Y-%m-%d") for d in df["service_date"].sort_values()]

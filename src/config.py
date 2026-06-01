@@ -18,6 +18,10 @@ WEATHER_OBS_END_HOUR = 13
 TARGET_COL = "visitors"
 DATE_COL = "service_date"
 
+BASELINE_MEALS_PREPARED = 150
+MEAL_WEIGHT_KG = 0.45
+KG_CO2E_PER_KG_FOOD_WASTE = 3.8
+
 
 def _safe_location_id(location_id: str) -> str:
     return "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in location_id.strip().lower())

@@ -20,6 +20,13 @@ from src.auth import (
 from src.config import DATE_COL, TARGET_COL, artifact_dir_for_location, model_file_for_location
 from src.data_admin import delete_record, load_clean_data, save_clean_data, upsert_record
 from src.location_config import save_locations, list_locations
+from src.prediction_logs import (
+    load_prediction_logs,
+    prediction_log_store_mode,
+    save_prediction_log,
+    summarize_monitoring,
+    update_prediction_logs_with_actual,
+)
 from src.predictor import VisitorPredictor
 
 ROOT = Path(__file__).resolve().parent
@@ -137,6 +144,10 @@ def render_prediction():
                 f"Quantile: {pred.predicted_quantile:.1f} | Residual Buffer: +{pred.residual_buffer:.1f} | "
                 f"Suggested Meals: {pred.suggested_meals}"
             )
+            try:
+                save_prediction_log(location_id, pred, created_by=user["username"], source_app="admin")
+            except Exception:
+                st.warning("Prediction was generated, but monitoring log could not be saved.")
         except Exception as e:
             st.error(f"Prediction failed: {e}")
 
@@ -163,6 +174,60 @@ def render_metrics():
     img2 = artifact_dir / "backtest_abs_error.png"
     if img1.exists() and img2.exists():
         st.image([str(img1), str(img2)], caption=["Actual vs Pred/PredQ", "Absolute Error"])
+
+
+def render_model_monitoring():
+    st.subheader("Model Monitoring")
+    scope = st.radio("Scope", options=["Selected location", "All locations"], horizontal=True)
+    monitor_location_id = location_id if scope == "Selected location" else None
+    st.caption(f"Prediction log store: {prediction_log_store_mode()}")
+
+    try:
+        summary = summarize_monitoring(location_id=monitor_location_id)
+        logs = load_prediction_logs(location_id=monitor_location_id, limit=200)
+    except Exception as exc:
+        st.warning(f"Monitoring data could not be loaded: {exc}")
+        return
+
+    c1, c2, c3, c4 = st.columns(4)
+    live_mae = summary.get("live_mae")
+    c1.metric("Live MAE", "N/A" if live_mae is None else f"{live_mae:.2f}")
+    c2.metric("Logs with actuals", int(summary.get("logs_with_actuals") or 0))
+    c3.metric("Waste avoided", f"{summary.get('total_estimated_waste_avoided_meals', 0):.1f} meals")
+    c4.metric("CO2e reduction", f"{summary.get('total_estimated_co2e_reduction_kg', 0):.1f} kg")
+
+    if not logs:
+        st.info("No prediction logs available yet.")
+        return
+
+    columns = [
+        "service_date",
+        "predicted_visitors",
+        "suggested_meals",
+        "actual_visitors",
+        "absolute_error",
+        "waste_avoided_meals",
+        "estimated_co2e_reduction_kg",
+        "prediction_created_at",
+        "created_by",
+        "source_app",
+    ]
+    if monitor_location_id is None:
+        columns.insert(0, "location_id")
+
+    rows = []
+    for log in logs:
+        row = {column: log.get(column) for column in columns}
+        for column in [
+            "predicted_visitors",
+            "absolute_error",
+            "waste_avoided_meals",
+            "estimated_co2e_reduction_kg",
+        ]:
+            if row.get(column) is not None:
+                row[column] = round(float(row[column]), 2)
+        rows.append(row)
+    st.dataframe(rows, use_container_width=True, hide_index=True)
 
 
 
@@ -195,8 +260,15 @@ def render_data_ops():
                 st.error("Please select date")
             else:
                 upsert_record(str(add_date), int(add_visitors), location_id)
+                monitoring_updated = True
+                try:
+                    update_prediction_logs_with_actual(location_id, str(add_date), int(add_visitors))
+                except Exception:
+                    monitoring_updated = False
+                    st.warning("Attendance was saved, but monitoring log could not be updated.")
                 st.success("Saved")
-                st.rerun()
+                if monitoring_updated:
+                    st.rerun()
 
     st.markdown("**Delete record**")
     del_options = [d.strftime("%Y-%m-%d") for d in df[DATE_COL].sort_values()] if not df.empty else []
@@ -612,18 +684,28 @@ def render_location_management():
 
 
 
-t1, t2, t3, t4, t5, t6 = st.tabs(
-    ["Prediction", "Metrics", "Data Management", "Staff Access", "Location Management", "Admin Diagnostics"]
+t1, t2, t3, t4, t5, t6, t7 = st.tabs(
+    [
+        "Prediction",
+        "Metrics",
+        "Model Monitoring",
+        "Data Management",
+        "Staff Access",
+        "Location Management",
+        "Admin Diagnostics",
+    ]
 )
 with t1:
     render_prediction()
 with t2:
     render_metrics()
 with t3:
-    render_data_ops()
+    render_model_monitoring()
 with t4:
-    render_staff_access()
+    render_data_ops()
 with t5:
-    render_location_management()
+    render_staff_access()
 with t6:
+    render_location_management()
+with t7:
     render_admin_diagnostics()

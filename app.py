@@ -17,7 +17,7 @@ from src.auth import (
     validate_password,
     validate_user_record,
 )
-from src.config import DATE_COL, TARGET_COL, artifact_dir_for_location, model_file_for_location
+from src.config import DATE_COL, ESTIMATED_WASTE_REDUCTION_RATE, TARGET_COL, artifact_dir_for_location, model_file_for_location
 from src.data_admin import delete_record, load_clean_data, save_clean_data, upsert_record
 from src.location_config import save_locations, list_locations
 from src.prediction_logs import (
@@ -195,6 +195,10 @@ def render_model_monitoring():
     c2.metric("Logs with actuals", int(summary.get("logs_with_actuals") or 0))
     c3.metric("Waste avoided", f"{summary.get('total_estimated_waste_avoided_meals', 0):.1f} meals")
     c4.metric("CO2e reduction", f"{summary.get('total_estimated_co2e_reduction_kg', 0):.1f} kg")
+    st.caption(
+        f"Estimated waste avoided is based on a {ESTIMATED_WASTE_REDUCTION_RATE:.0%} meal-waste "
+        "reduction assumption. These are planning estimates, not verified waste measurements."
+    )
 
     if not logs:
         st.info("No prediction logs available yet.")

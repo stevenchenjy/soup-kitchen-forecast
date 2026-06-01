@@ -5,7 +5,13 @@ from pathlib import Path
 import streamlit as st
 
 from src.auth import authenticate_user, get_authorized_locations, get_user, require_role
-from src.config import TARGET_COL, model_file_for_location
+from src.config import (
+    ESTIMATED_WASTE_REDUCTION_RATE,
+    KG_CO2E_PER_KG_FOOD_WASTE,
+    MEAL_WEIGHT_KG,
+    TARGET_COL,
+    model_file_for_location,
+)
 from src.data_admin import delete_record, load_clean_data, upsert_record
 from src.location_config import list_locations
 from src.prediction_logs import save_prediction_log, update_prediction_logs_with_actual
@@ -105,13 +111,29 @@ if predictor is None:
         else:
             st.error("Training failed")
 else:
-    buf = st.slider("Base meal buffer (%)", 0, 30, 8, 1)
+    buf = st.slider(
+        "Extra meals safety buffer (%)",
+        0,
+        30,
+        8,
+        1,
+        help="This adds a small safety margin so the kitchen prepares a few extra meals in case more visitors arrive than predicted.",
+    )
     custom_date = st.text_input("Target service date (Saturday/Sunday, YYYY-MM-DD)", value="")
     if st.button("Get meal recommendation", type="primary"):
         pred = predictor.predict_next(target_date=custom_date or None, meal_buffer_pct=buf / 100.0)
         st.success(
             f"Location: {location_id} | {pred.service_date:%Y-%m-%d} | Suggested meal prep: {pred.suggested_meals} "
             f"(Point: {pred.predicted_visitors:.1f}, Quantile: {pred.predicted_quantile:.1f}, Residual: +{pred.residual_buffer:.1f})"
+        )
+        estimated_food_saved = pred.suggested_meals * ESTIMATED_WASTE_REDUCTION_RATE
+        estimated_carbon_reduced = estimated_food_saved * MEAL_WEIGHT_KG * KG_CO2E_PER_KG_FOOD_WASTE
+        c1, c2 = st.columns(2)
+        c1.metric("Estimated Food Saved", f"{estimated_food_saved:.1f} meals")
+        c2.metric("Estimated Carbon Reduced", f"{estimated_carbon_reduced:.1f} kg CO2e")
+        st.caption(
+            f"These are planning estimates based on a {ESTIMATED_WASTE_REDUCTION_RATE:.0%} "
+            "waste-reduction assumption, not verified waste measurements."
         )
         try:
             save_prediction_log(location_id, pred, created_by=user["username"], source_app="staff")

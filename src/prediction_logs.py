@@ -15,6 +15,7 @@ except ModuleNotFoundError:
 
 from src.config import (
     BASELINE_MEALS_PREPARED,
+    ESTIMATED_WASTE_REDUCTION_RATE,
     KG_CO2E_PER_KG_FOOD_WASTE,
     MEAL_WEIGHT_KG,
     location_db_file,
@@ -162,10 +163,8 @@ def _connect(location_id: str) -> sqlite3.Connection:
     return conn
 
 
-def _waste_fields(baseline_meals_prepared: int | None, suggested_meals: int) -> tuple[float | None, float | None]:
-    if baseline_meals_prepared is None:
-        return None, None
-    waste_avoided = max(float(baseline_meals_prepared) - float(suggested_meals), 0.0)
+def _waste_fields(suggested_meals: int) -> tuple[float, float]:
+    waste_avoided = float(suggested_meals) * ESTIMATED_WASTE_REDUCTION_RATE
     co2e = waste_avoided * MEAL_WEIGHT_KG * KG_CO2E_PER_KG_FOOD_WASTE
     return waste_avoided, co2e
 
@@ -179,7 +178,7 @@ def _row_from_prediction(
 ) -> dict[str, Any]:
     baseline = BASELINE_MEALS_PREPARED if baseline_meals_prepared is None else baseline_meals_prepared
     suggested_meals = int(prediction_output.suggested_meals)
-    waste_avoided, co2e = _waste_fields(baseline, suggested_meals)
+    waste_avoided, co2e = _waste_fields(suggested_meals)
     now = _now()
     return {
         "location_id": location_id,
@@ -234,9 +233,8 @@ def save_prediction_log(
 
 def _actual_update_values(row: dict[str, Any], actual_visitors: int) -> dict[str, Any]:
     absolute_error = abs(float(actual_visitors) - float(row["predicted_visitors"]))
-    baseline = row.get("baseline_meals_prepared")
     suggested_meals = int(row["suggested_meals"])
-    waste_avoided, co2e = _waste_fields(int(baseline) if baseline is not None else None, suggested_meals)
+    waste_avoided, co2e = _waste_fields(suggested_meals)
     return {
         "actual_visitors": int(actual_visitors),
         "absolute_error": absolute_error,
@@ -252,7 +250,7 @@ def update_prediction_logs_with_actual(location_id: str, service_date: str, actu
         rows = _supabase_request(
             "GET",
             params={
-                "select": "id,predicted_visitors,suggested_meals,baseline_meals_prepared",
+                "select": "id,predicted_visitors,suggested_meals",
                 "location_id": f"eq.{location_id}",
                 "service_date": f"eq.{dt}",
             },
@@ -271,7 +269,7 @@ def update_prediction_logs_with_actual(location_id: str, service_date: str, actu
 
     with _connect(location_id) as conn:
         rows = conn.execute(
-            "SELECT id, predicted_visitors, suggested_meals, baseline_meals_prepared "
+            "SELECT id, predicted_visitors, suggested_meals "
             "FROM prediction_logs WHERE location_id = ? AND service_date = ?",
             (location_id, dt),
         ).fetchall()

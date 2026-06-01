@@ -324,19 +324,11 @@ def render_data_ops():
             st.error("Training failed.")
 
 
-def render_master_accounts(users):
+def render_master_accounts(users, location_display_row):
     st.subheader("Master/Admin Accounts")
     master_users = [account for account in users if require_role(account, {"master", "admin"})]
     if master_users:
-        rows = [
-            {
-                "Username": account["username"],
-                "Role": account["role"],
-                "Authorized locations": ", ".join(account.get("authorized_locations", [])) or "None",
-            }
-            for account in master_users
-        ]
-        st.dataframe(rows, use_container_width=True, hide_index=True)
+        st.dataframe([location_display_row(account) for account in master_users], use_container_width=True, hide_index=True)
     else:
         st.info("No master/admin accounts have been created yet.")
 
@@ -443,23 +435,35 @@ def render_staff_access():
         loc = locations_by_id.get(location_id)
         return f"{loc.name} ({location_id})" if loc else location_id
 
+    def assigned_locations_label(account: dict) -> str:
+        role = account.get("role")
+        assigned_locations = account.get("authorized_locations", [])
+        if role == "master":
+            return "All Locations"
+        if not assigned_locations:
+            return "None"
+        labels = []
+        for location_id in assigned_locations:
+            loc = locations_by_id.get(location_id)
+            labels.append(loc.name if loc else f"Unknown location ({location_id})")
+        return ", ".join(labels)
+
+    def location_display_row(account: dict) -> dict:
+        validation = validate_user_record(account["username"])
+        return {
+            "Username": account["username"],
+            "Role": account.get("role", ""),
+            "Assigned Locations": assigned_locations_label(account),
+            "Status": "Active" if validation["passed"] else "Invalid",
+        }
+
     staff_users = [account for account in users if account["role"] == "staff"]
     if staff_users:
-        rows = []
-        for account in staff_users:
-            assigned_locations = account.get("authorized_locations", [])
-            rows.append(
-                {
-                    "Username": account["username"],
-                    "Authorized locations": ", ".join(location_label(location_id) for location_id in assigned_locations)
-                    or "None",
-                }
-            )
-        st.dataframe(rows, use_container_width=True, hide_index=True)
+        st.dataframe([location_display_row(account) for account in staff_users], use_container_width=True, hide_index=True)
     else:
         st.info("No staff accounts have been created yet.")
 
-    render_master_accounts(users)
+    render_master_accounts(users, location_display_row)
 
     st.markdown("**Create staff account**")
     with st.form("create_staff_account"):
@@ -597,28 +601,16 @@ def render_admin_diagnostics():
     st.caption(f"User store: {user_store_mode()}")
     st.caption(f"Attendance store: {attendance_store_mode()}")
 
-    location_ids = {loc.id for loc in locations}
     rows = []
     for account in users:
-        authorized_locations = account.get("authorized_locations", [])
         account_type = "hashed" if all(account.get(field) for field in ("password_hash", "salt", "iterations")) else "plaintext"
         validation = validate_user_record(account["username"])
-        if account["role"] == "master" and authorized_locations == ["*"]:
-            authorized_count = "all"
-            location_status = "OK"
-        else:
-            invalid_locations = [location_id for location_id in authorized_locations if location_id not in location_ids]
-            authorized_count = len(authorized_locations)
-            location_status = "OK" if not invalid_locations else f"Unknown: {', '.join(invalid_locations)}"
         rows.append(
             {
                 "Username": account["username"],
-                "Role": account["role"],
                 "Account type": account_type,
-                "Authorized locations count": authorized_count,
                 "Record check": "Pass" if validation["passed"] else "Fail",
                 "Reason": validation["reason"],
-                "Location IDs": location_status,
             }
         )
 

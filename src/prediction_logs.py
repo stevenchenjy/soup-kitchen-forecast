@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 from datetime import datetime, timezone
+from collections.abc import Iterable
 from typing import Any
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -169,6 +170,20 @@ def _waste_fields(suggested_meals: int) -> tuple[float, float]:
     return waste_avoided, co2e
 
 
+def _recalculate_absolute_error(row: dict[str, Any]) -> None:
+    if row.get("actual_visitors") is None:
+        row["absolute_error"] = None
+        return
+    row["absolute_error"] = abs(float(row["actual_visitors"]) - float(row["predicted_visitors"]))
+
+
+def _first_actual_visitors(rows: Iterable[dict[str, Any]]) -> Any | None:
+    for row in rows:
+        if row.get("actual_visitors") is not None:
+            return row["actual_visitors"]
+    return None
+
+
 def _row_from_prediction(
     location_id: str,
     prediction_output: Any,
@@ -211,18 +226,73 @@ def save_prediction_log(
 ) -> int | str | None:
     row = _row_from_prediction(location_id, prediction_output, created_by, source_app, baseline_meals_prepared)
     if _supabase_config():
+        existing_rows = _supabase_request(
+            "GET",
+            params={
+                "select": "id,actual_visitors,created_at",
+                "location_id": f"eq.{row['location_id']}",
+                "service_date": f"eq.{row['service_date']}",
+                "order": "prediction_created_at.desc,id.desc",
+            },
+        )
+        if isinstance(existing_rows, list) and existing_rows:
+            keep = existing_rows[0]
+            row["actual_visitors"] = _first_actual_visitors(existing_rows)
+            if keep.get("created_at"):
+                row["created_at"] = keep["created_at"]
+            _recalculate_absolute_error(row)
+            _supabase_request(
+                "PATCH",
+                params={"id": f"eq.{keep['id']}"},
+                payload=row,
+                extra_headers={"Prefer": "return=minimal"},
+            )
+            for duplicate in existing_rows[1:]:
+                _supabase_request(
+                    "DELETE",
+                    params={"id": f"eq.{duplicate['id']}"},
+                    extra_headers={"Prefer": "return=minimal"},
+                )
+            return keep.get("id")
+
         result = _supabase_request(
             "POST",
+            params={"on_conflict": "location_id,service_date"},
             payload=row,
-            extra_headers={"Prefer": "return=representation"},
+            extra_headers={"Prefer": "resolution=merge-duplicates,return=representation"},
         )
         if isinstance(result, list) and result:
             return result[0].get("id")
         return None
 
-    columns = list(row)
-    placeholders = ", ".join("?" for _ in columns)
     with _connect(location_id) as conn:
+        existing_rows = conn.execute(
+            "SELECT id, actual_visitors, created_at FROM prediction_logs "
+            "WHERE location_id = ? AND service_date = ? "
+            "ORDER BY prediction_created_at DESC, id DESC",
+            (row["location_id"], row["service_date"]),
+        )
+        existing = existing_rows.fetchall()
+        if existing:
+            keep = existing[0]
+            row["actual_visitors"] = _first_actual_visitors(dict(existing_row) for existing_row in existing)
+            row["created_at"] = keep["created_at"]
+            _recalculate_absolute_error(row)
+            assignments = ", ".join(f"{column} = ?" for column in row if column != "id")
+            values = [row[column] for column in row if column != "id"]
+            conn.execute(
+                f"UPDATE prediction_logs SET {assignments} WHERE id = ?",
+                values + [keep["id"]],
+            )
+            duplicate_ids = [duplicate["id"] for duplicate in existing[1:]]
+            if duplicate_ids:
+                placeholders = ", ".join("?" for _ in duplicate_ids)
+                conn.execute(f"DELETE FROM prediction_logs WHERE id IN ({placeholders})", duplicate_ids)
+            conn.commit()
+            return keep["id"]
+
+        columns = list(row)
+        placeholders = ", ".join("?" for _ in columns)
         cur = conn.execute(
             f"INSERT INTO prediction_logs ({', '.join(columns)}) VALUES ({placeholders})",
             [row[column] for column in columns],
@@ -304,26 +374,93 @@ def _load_local_logs_for_location(location_id: str, limit: int) -> list[dict[str
     return [dict(row) for row in rows]
 
 
+def _latest_logs(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    sorted_rows = sorted(
+        rows,
+        key=lambda row: (
+            str(row.get("location_id", "")),
+            str(row.get("service_date", "")),
+            str(row.get("prediction_created_at", "")),
+            int(row.get("id") or 0),
+        ),
+        reverse=True,
+    )
+    grouped_rows: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in sorted_rows:
+        key = (str(row.get("location_id", "")), str(row.get("service_date", "")))
+        grouped_rows.setdefault(key, []).append(row)
+
+    latest_rows: list[dict[str, Any]] = []
+    for grouped in grouped_rows.values():
+        latest = dict(grouped[0])
+        if latest.get("actual_visitors") is None:
+            latest["actual_visitors"] = _first_actual_visitors(grouped)
+            _recalculate_absolute_error(latest)
+        latest_rows.append(latest)
+
+    latest_rows.sort(
+        key=lambda row: (str(row.get("service_date", "")), str(row.get("prediction_created_at", ""))),
+        reverse=True,
+    )
+    return latest_rows[: int(limit)]
+
+
 def load_prediction_logs(location_id: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
     if _supabase_config():
         params = {
             "select": "*",
-            "order": "prediction_created_at.desc",
-            "limit": str(int(limit)),
+            "order": "service_date.desc,prediction_created_at.desc",
         }
         if location_id is not None:
             params["location_id"] = f"eq.{location_id}"
         rows = _supabase_request("GET", params=params)
-        return rows if isinstance(rows, list) else []
+        return _latest_logs(rows, limit) if isinstance(rows, list) else []
 
     if location_id is not None:
-        return _load_local_logs_for_location(location_id, limit)
+        return _latest_logs(_load_local_logs_for_location(location_id, max(int(limit) * 5, 1000)), limit)
 
     rows: list[dict[str, Any]] = []
     for location in list_locations():
-        rows.extend(_load_local_logs_for_location(location.id, limit))
-    rows.sort(key=lambda row: str(row.get("prediction_created_at", "")), reverse=True)
-    return rows[: int(limit)]
+        rows.extend(_load_local_logs_for_location(location.id, max(int(limit) * 5, 1000)))
+    return _latest_logs(rows, limit)
+
+
+def cleanup_logs_without_attendance(location_id: str, attendance_service_dates: Iterable[Any]) -> int:
+    valid_dates = {_service_date(value) for value in attendance_service_dates}
+    if _supabase_config():
+        rows = _supabase_request(
+            "GET",
+            params={
+                "select": "id,service_date",
+                "location_id": f"eq.{location_id}",
+            },
+        )
+        if not isinstance(rows, list):
+            return 0
+        stale_ids = [
+            row["id"]
+            for row in rows
+            if isinstance(row, dict) and _service_date(row.get("service_date")) not in valid_dates
+        ]
+        for stale_id in stale_ids:
+            _supabase_request(
+                "DELETE",
+                params={"id": f"eq.{stale_id}"},
+                extra_headers={"Prefer": "return=minimal"},
+            )
+        return len(stale_ids)
+
+    with _connect(location_id) as conn:
+        rows = conn.execute(
+            "SELECT id, service_date FROM prediction_logs WHERE location_id = ?",
+            (location_id,),
+        ).fetchall()
+        stale_ids = [row["id"] for row in rows if _service_date(row["service_date"]) not in valid_dates]
+        if stale_ids:
+            placeholders = ", ".join("?" for _ in stale_ids)
+            conn.execute(f"DELETE FROM prediction_logs WHERE id IN ({placeholders})", stale_ids)
+            conn.commit()
+        return len(stale_ids)
 
 
 def summarize_monitoring(location_id: str | None = None) -> dict[str, float | int | None]:

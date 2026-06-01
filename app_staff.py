@@ -129,11 +129,11 @@ else:
         estimated_food_saved = pred.suggested_meals * ESTIMATED_WASTE_REDUCTION_RATE
         estimated_carbon_reduced = estimated_food_saved * MEAL_WEIGHT_KG * KG_CO2E_PER_KG_FOOD_WASTE
         c1, c2 = st.columns(2)
-        c1.metric("Estimated Food Saved", f"{estimated_food_saved:.1f} meals")
+        c1.metric("Estimated Food Saved", f"{estimated_food_saved:.1f} meals of food")
         c2.metric("Estimated Carbon Reduced", f"{estimated_carbon_reduced:.1f} kg CO2e")
         st.caption(
             f"These are planning estimates based on a {ESTIMATED_WASTE_REDUCTION_RATE:.0%} "
-            "waste-reduction assumption, not verified waste measurements."
+            "waste-reduction assumption."
         )
         try:
             save_prediction_log(location_id, pred, created_by=user["username"], source_app="staff")

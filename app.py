@@ -21,6 +21,7 @@ from src.config import DATE_COL, ESTIMATED_WASTE_REDUCTION_RATE, TARGET_COL, art
 from src.data_admin import attendance_store_mode, delete_record, load_clean_data, save_clean_data, upsert_record
 from src.location_config import save_locations, list_locations
 from src.prediction_logs import (
+    cleanup_logs_without_attendance,
     load_prediction_logs,
     prediction_log_store_mode,
     save_prediction_log,
@@ -197,8 +198,26 @@ def render_model_monitoring():
     c4.metric("CO2e reduction", f"{summary.get('total_estimated_co2e_reduction_kg', 0):.1f} kg")
     st.caption(
         f"Estimated waste avoided is based on a {ESTIMATED_WASTE_REDUCTION_RATE:.0%} meal-waste "
-        "reduction assumption. These are planning estimates, not verified waste measurements."
+        "reduction assumption, not verified waste measurement."
     )
+
+    st.markdown("**Cleanup**")
+    cleanup_confirm = st.checkbox(
+        "I understand this will remove prediction logs for the selected location when the service date is not in attendance."
+    )
+    if st.button("Remove logs without matching attendance record"):
+        if monitor_location_id is None:
+            st.error("Select a single location before running cleanup.")
+        elif not cleanup_confirm:
+            st.error("Please confirm cleanup first.")
+        else:
+            try:
+                attendance_df = load_clean_data(monitor_location_id)
+                removed = cleanup_logs_without_attendance(monitor_location_id, attendance_df[DATE_COL])
+                st.success(f"Removed {removed} stale prediction log row(s).")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Cleanup failed: {exc}")
 
     if not logs:
         st.info("No prediction logs available yet.")

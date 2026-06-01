@@ -11,7 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.config import location_db_file
-from src.data_admin import _supabase_config, _supabase_request
+from src.data_admin import _supabase_config, _supabase_request, attendance_config_source
 from src.location_config import list_locations
 
 
@@ -90,7 +90,11 @@ def migrate_location(location_id: str) -> tuple[int, int]:
 
 def main() -> int:
     args = parse_args()
-    if _supabase_config() is None:
+    config = _supabase_config()
+    source = attendance_config_source()
+    print(f"Supabase configured: {'yes' if config else 'no'}", flush=True)
+    print(f"Configuration source: {source}", flush=True)
+    if config is None:
         print("Supabase is not configured. Add Supabase secrets before running this migration.", file=sys.stderr)
         return 1
 

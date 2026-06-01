@@ -39,12 +39,7 @@ def _connect(location_id: str) -> sqlite3.Connection:
     return conn
 
 
-def _secret_value(*names: str) -> str | None:
-    for name in names:
-        env_value = os.getenv(name)
-        if env_value:
-            return env_value
-
+def _streamlit_secret_value(*names: str) -> str | None:
     if st is None:
         return None
 
@@ -76,13 +71,41 @@ def _secret_value(*names: str) -> str | None:
     return None
 
 
-def _supabase_config() -> dict[str, str] | None:
-    url = _secret_value("SUPABASE_URL", "url")
-    key = _secret_value("SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_ANON_KEY", "service_role_key", "anon_key", "key")
-    table = _secret_value("SUPABASE_ATTENDANCE_TABLE", "attendance_table") or ATTENDANCE_TABLE_DEFAULT
+def _env_secret_value(*names: str) -> str | None:
+    for name in names:
+        env_value = os.getenv(name)
+        if env_value:
+            return env_value
+    return None
+
+
+def _secret_value(*names: str) -> str | None:
+    return _streamlit_secret_value(*names) or _env_secret_value(*names)
+
+
+def _supabase_config_for_source(source: str) -> dict[str, str] | None:
+    getter = _streamlit_secret_value if source == "streamlit secrets" else _env_secret_value
+    url = getter("SUPABASE_URL", "url")
+    key = getter("SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_ANON_KEY", "service_role_key", "anon_key", "key")
+    table = getter("SUPABASE_ATTENDANCE_TABLE", "attendance_table") or ATTENDANCE_TABLE_DEFAULT
     if not url or not key:
         return None
     return {"url": url.rstrip("/"), "key": key, "table": table}
+
+
+def _supabase_config() -> dict[str, str] | None:
+    streamlit_config = _supabase_config_for_source("streamlit secrets")
+    if streamlit_config:
+        return streamlit_config
+    return _supabase_config_for_source("environment variables")
+
+
+def attendance_config_source() -> str:
+    if _supabase_config_for_source("streamlit secrets"):
+        return "streamlit secrets"
+    if _supabase_config_for_source("environment variables"):
+        return "environment variables"
+    return "fallback"
 
 
 def attendance_store_mode() -> str:

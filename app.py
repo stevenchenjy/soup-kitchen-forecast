@@ -20,6 +20,7 @@ from src.auth import (
 from src.config import DATE_COL, ESTIMATED_WASTE_REDUCTION_RATE, TARGET_COL, artifact_dir_for_location, model_file_for_location
 from src.data_admin import attendance_store_mode, delete_record, load_clean_data, save_clean_data, upsert_record
 from src.location_config import save_locations, list_locations
+from src.model_training_runs import latest_successful_training_run, latest_training_run, model_training_run_store_mode
 from src.prediction_logs import (
     cleanup_logs_without_attendance,
     load_prediction_logs,
@@ -182,6 +183,27 @@ def render_model_monitoring():
     scope = st.radio("Scope", options=["Selected location", "All locations"], horizontal=True)
     monitor_location_id = location_id if scope == "Selected location" else None
     st.caption(f"Prediction log store: {prediction_log_store_mode()}")
+
+    st.markdown("**Training status**")
+    st.caption(f"Training run store: {model_training_run_store_mode()}")
+    try:
+        latest_run = latest_training_run(location_id)
+        latest_success = latest_successful_training_run(location_id)
+    except Exception as exc:
+        latest_run = None
+        latest_success = None
+        st.warning(f"Training status could not be loaded: {exc}")
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Last successful training", latest_success.get("finished_at", "Never") if latest_success else "Never")
+    c2.metric("Last status", latest_run.get("status", "No runs") if latest_run else "No runs")
+    c3.metric("Attendance rows", latest_run.get("attendance_rows", "N/A") if latest_run else "N/A")
+    c4.metric(
+        "Latest attendance update",
+        latest_run.get("latest_attendance_updated_at", "N/A") if latest_run else "N/A",
+    )
+    if latest_run and latest_run.get("status") == "failed" and latest_run.get("error_message"):
+        st.error(latest_run["error_message"])
 
     try:
         summary = summarize_monitoring(location_id=monitor_location_id)

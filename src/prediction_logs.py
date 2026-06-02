@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 import json
 import os
 import sqlite3
 from datetime import datetime, timezone
-from collections.abc import Iterable
 from typing import Any
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -50,7 +50,6 @@ CREATE TABLE IF NOT EXISTS prediction_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_prediction_logs_location_id ON prediction_logs(location_id);
 CREATE INDEX IF NOT EXISTS idx_prediction_logs_service_date ON prediction_logs(service_date);
-CREATE INDEX IF NOT EXISTS idx_prediction_logs_location_service ON prediction_logs(location_id, service_date);
 """
 
 
@@ -160,6 +159,11 @@ def _connect(location_id: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA_SQL)
+    _dedupe_prediction_logs_sqlite(conn)
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_prediction_logs_location_service_unique "
+        "ON prediction_logs(location_id, service_date)"
+    )
     conn.commit()
     return conn
 
@@ -182,6 +186,31 @@ def _first_actual_visitors(rows: Iterable[dict[str, Any]]) -> Any | None:
         if row.get("actual_visitors") is not None:
             return row["actual_visitors"]
     return None
+
+
+def _dedupe_prediction_logs_sqlite(conn: sqlite3.Connection) -> None:
+    rows = conn.execute(
+        "SELECT id, location_id, service_date, prediction_created_at, predicted_visitors, actual_visitors "
+        "FROM prediction_logs ORDER BY location_id, service_date, prediction_created_at DESC, id DESC"
+    ).fetchall()
+    grouped_rows: dict[tuple[str, str], list[sqlite3.Row]] = {}
+    for row in rows:
+        grouped_rows.setdefault((row["location_id"], row["service_date"]), []).append(row)
+
+    for grouped in grouped_rows.values():
+        if len(grouped) <= 1:
+            continue
+        keep = grouped[0]
+        actual_visitors = _first_actual_visitors(dict(row) for row in grouped)
+        if actual_visitors is not None:
+            absolute_error = abs(float(actual_visitors) - float(keep["predicted_visitors"]))
+            conn.execute(
+                "UPDATE prediction_logs SET actual_visitors = ?, absolute_error = ?, updated_at = ? WHERE id = ?",
+                (int(actual_visitors), absolute_error, _now(), keep["id"]),
+            )
+        duplicate_ids = [row["id"] for row in grouped[1:]]
+        placeholders = ", ".join("?" for _ in duplicate_ids)
+        conn.execute(f"DELETE FROM prediction_logs WHERE id IN ({placeholders})", duplicate_ids)
 
 
 def _row_from_prediction(
@@ -323,16 +352,24 @@ def update_prediction_logs_with_actual(location_id: str, service_date: str, actu
                 "select": "id,predicted_visitors,suggested_meals",
                 "location_id": f"eq.{location_id}",
                 "service_date": f"eq.{dt}",
+                "order": "prediction_created_at.desc,id.desc",
             },
         )
         if not isinstance(rows, list):
             return 0
-        for row in rows:
-            values = _actual_update_values(row, actual_visitors)
+        if not rows:
+            return 0
+        values = _actual_update_values(rows[0], actual_visitors)
+        _supabase_request(
+            "PATCH",
+            params={"id": f"eq.{rows[0]['id']}"},
+            payload=values,
+            extra_headers={"Prefer": "return=minimal"},
+        )
+        for duplicate in rows[1:]:
             _supabase_request(
-                "PATCH",
-                params={"id": f"eq.{row['id']}"},
-                payload=values,
+                "DELETE",
+                params={"id": f"eq.{duplicate['id']}"},
                 extra_headers={"Prefer": "return=minimal"},
             )
         return len(rows)
@@ -340,23 +377,29 @@ def update_prediction_logs_with_actual(location_id: str, service_date: str, actu
     with _connect(location_id) as conn:
         rows = conn.execute(
             "SELECT id, predicted_visitors, suggested_meals "
-            "FROM prediction_logs WHERE location_id = ? AND service_date = ?",
+            "FROM prediction_logs WHERE location_id = ? AND service_date = ? "
+            "ORDER BY prediction_created_at DESC, id DESC",
             (location_id, dt),
         ).fetchall()
-        for row in rows:
-            values = _actual_update_values(dict(row), actual_visitors)
-            conn.execute(
-                "UPDATE prediction_logs SET actual_visitors = ?, absolute_error = ?, "
-                "waste_avoided_meals = ?, estimated_co2e_reduction_kg = ?, updated_at = ? WHERE id = ?",
-                (
-                    values["actual_visitors"],
-                    values["absolute_error"],
-                    values["waste_avoided_meals"],
-                    values["estimated_co2e_reduction_kg"],
-                    values["updated_at"],
-                    row["id"],
-                ),
-            )
+        if not rows:
+            return 0
+        values = _actual_update_values(dict(rows[0]), actual_visitors)
+        conn.execute(
+            "UPDATE prediction_logs SET actual_visitors = ?, absolute_error = ?, "
+            "waste_avoided_meals = ?, estimated_co2e_reduction_kg = ?, updated_at = ? WHERE id = ?",
+            (
+                values["actual_visitors"],
+                values["absolute_error"],
+                values["waste_avoided_meals"],
+                values["estimated_co2e_reduction_kg"],
+                values["updated_at"],
+                rows[0]["id"],
+            ),
+        )
+        duplicate_ids = [row["id"] for row in rows[1:]]
+        if duplicate_ids:
+            placeholders = ", ".join("?" for _ in duplicate_ids)
+            conn.execute(f"DELETE FROM prediction_logs WHERE id IN ({placeholders})", duplicate_ids)
         conn.commit()
         return len(rows)
 

@@ -8,7 +8,7 @@ from src.config import (
     TARGET_COL,
     model_file_for_location,
 )
-from src.data_admin import load_clean_data, upsert_record
+from src.data_admin import delete_record, load_clean_data, upsert_record
 from src.location_config import list_locations
 from src.prediction_logs import save_prediction_log, update_prediction_logs_with_actual
 from src.predictor import VisitorPredictor
@@ -92,6 +92,10 @@ if sidebar.button("Logout"):
 model_path = model_file_for_location(location_id)
 df = load_clean_data(location_id)
 predictor = VisitorPredictor(str(model_path)) if model_path.exists() else None
+cancel_message = st.session_state.pop("staff_cancel_message", None)
+if cancel_message:
+    st.success(cancel_message)
+    st.warning("Matching prediction log actuals are not cleared automatically yet.")
 
 st.subheader(f"Daily Actions - {selected_name}")
 if predictor is None:
@@ -144,6 +148,21 @@ if st.button("Add / Update"):
 
 if not df.empty:
     st.markdown("**Recent visitor counts**")
-    recent_df = df[["service_date", TARGET_COL]].sort_values("service_date", ascending=False).head(10)
+    recent_df = df[["service_date", TARGET_COL]].sort_values("service_date", ascending=False).head(5).copy()
+    recent_df["service_date"] = recent_df["service_date"].dt.strftime("%Y-%m-%d")
     recent_df = recent_df.rename(columns={"service_date": "Service date", TARGET_COL: "Actual visitors served"})
     st.dataframe(recent_df, use_container_width=True, hide_index=True, height=300)
+
+    latest_date = recent_df.iloc[0]["Service date"]
+    st.markdown("**Cancel latest entry**")
+    with st.form("cancel_latest_entry"):
+        st.write(f"Do you want to cancel the input on {latest_date}?")
+        confirm_cancel = st.checkbox("Yes, cancel this latest entry")
+        cancel_ok = st.form_submit_button("Cancel latest entry")
+    if cancel_ok:
+        if not confirm_cancel:
+            st.error("Please confirm before canceling the latest entry.")
+        else:
+            delete_record(latest_date, location_id)
+            st.session_state["staff_cancel_message"] = f"Canceled latest entry for {latest_date}."
+            st.rerun()

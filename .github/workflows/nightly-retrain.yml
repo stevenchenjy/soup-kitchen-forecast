@@ -47,7 +47,20 @@ jobs:
           python scripts/nightly_retrain.py $ARGS
 
       - name: Validate trained model loading
-        run: python -c "from src.predictor import VisitorPredictor; VisitorPredictor('models/visitor_model_ny_12550.joblib')"
+        run: |
+          if git diff --quiet -- models; then
+            echo "No changed model files to validate."
+            exit 0
+          fi
+
+          python - <<'PY'
+          from pathlib import Path
+          from src.predictor import VisitorPredictor
+
+          for model_path in sorted(Path("models").glob("visitor_model_*.joblib")):
+              VisitorPredictor(str(model_path))
+              print(f"Validated {model_path}")
+          PY
 
       - name: Commit updated models and artifacts
         run: |

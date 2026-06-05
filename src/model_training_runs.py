@@ -267,6 +267,7 @@ def create_training_run(
     *,
     location_id: str,
     status: str,
+    finished_at: str | None = None,
     attendance_rows: int | None = None,
     latest_attendance_updated_at_value: str | None = None,
     model_path: str | None = None,
@@ -278,6 +279,7 @@ def create_training_run(
     payload = {
         "location_id": location_id,
         "status": status,
+        "finished_at": finished_at,
         "attendance_rows": attendance_rows,
         "latest_attendance_updated_at": latest_attendance_updated_at_value,
         "model_path": model_path,

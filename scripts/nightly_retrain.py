@@ -18,24 +18,14 @@ from src.config import artifact_dir_for_location, model_file_for_location
 from src.data_admin import load_clean_data
 from src.location_config import Location, list_locations
 from src.model_training_runs import (
+    clear_location_dirty,
     create_training_run,
+    get_retrain_state,
     latest_attendance_updated_at,
-    latest_successful_training_run,
+    list_dirty_location_ids,
+    mark_location_dirty,
     supabase_configured,
-    update_training_run,
 )
-
-
-def _parse_timestamp(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
 
 
 def _relative_path(path: Path) -> str:
@@ -52,6 +42,10 @@ def _load_metrics(location_id: str) -> dict[str, Any] | None:
     return json.loads(metrics_path.read_text(encoding="utf-8"))
 
 
+def _locations_by_id() -> dict[str, Location]:
+    return {location.id: location for location in list_locations()}
+
+
 def _selected_locations(args: argparse.Namespace) -> list[Location]:
     locations = list_locations()
     if args.all:
@@ -62,112 +56,77 @@ def _selected_locations(args: argparse.Namespace) -> list[Location]:
     return matches
 
 
-def _should_skip_for_unchanged_attendance(
-    location_id: str,
-    latest_attendance_update: str | None,
-    force: bool,
-) -> str | None:
-    if force:
-        return None
-    latest_success = latest_successful_training_run(location_id)
-    if latest_success is None:
-        return None
+def _dirty_locations(args: argparse.Namespace) -> list[Location]:
+    locations_by_id = _locations_by_id()
+    if args.location and args.location not in locations_by_id:
+        raise ValueError(f"Unknown location: {args.location}")
+    if args.force:
+        return _selected_locations(args)
 
-    previous_attendance_update = latest_success.get("latest_attendance_updated_at")
-    current_dt = _parse_timestamp(latest_attendance_update)
-    previous_dt = _parse_timestamp(previous_attendance_update)
-    if current_dt is not None and previous_dt is not None and current_dt <= previous_dt:
-        return "Attendance has not changed since the last successful training run."
-    if latest_attendance_update and latest_attendance_update == previous_attendance_update:
-        return "Attendance has not changed since the last successful training run."
-    return None
+    dirty_ids = set(list_dirty_location_ids())
+    if args.location:
+        dirty_ids &= {args.location}
+    locations = [locations_by_id[location_id] for location_id in dirty_ids if location_id in locations_by_id]
+    locations.sort(key=lambda location: location.id)
+    return locations
 
 
-def _record_skipped(
-    location_id: str,
-    attendance_rows: int,
-    latest_attendance_update: str | None,
-    reason: str,
-) -> None:
-    create_training_run(
-        location_id=location_id,
-        status="skipped",
-        attendance_rows=attendance_rows,
-        latest_attendance_updated_at_value=latest_attendance_update,
-        model_path=_relative_path(model_file_for_location(location_id)),
-        artifact_dir=_relative_path(artifact_dir_for_location(location_id)),
-        commit_sha=os.getenv("GITHUB_SHA"),
-        error_message=reason,
-    )
+def _latest_attendance_update(location_id: str) -> str | None:
+    state = get_retrain_state(location_id)
+    if state and state.get("last_attendance_updated_at"):
+        return state["last_attendance_updated_at"]
+    return latest_attendance_updated_at(location_id)
 
 
 def retrain_one_location(location: Location, args: argparse.Namespace) -> str:
     print(f"=== {location.id}: checking attendance ===", flush=True)
     attendance_df = load_clean_data(location.id)
     attendance_rows = int(len(attendance_df))
-    latest_attendance_update = latest_attendance_updated_at(location.id)
+    latest_attendance_update = _latest_attendance_update(location.id)
     model_path = model_file_for_location(location.id)
     artifact_dir = artifact_dir_for_location(location.id)
 
-    if attendance_rows < args.min_train_size:
-        reason = f"Only {attendance_rows} attendance rows; need at least {args.min_train_size}."
-        print(f"{location.id}: skipped - {reason}", flush=True)
-        _record_skipped(location.id, attendance_rows, latest_attendance_update, reason)
-        return "skipped"
-
-    unchanged_reason = _should_skip_for_unchanged_attendance(location.id, latest_attendance_update, args.force)
-    if unchanged_reason:
-        print(f"{location.id}: skipped - {unchanged_reason}", flush=True)
-        _record_skipped(location.id, attendance_rows, latest_attendance_update, unchanged_reason)
-        return "skipped"
-
-    run_id = create_training_run(
-        location_id=location.id,
-        status="running",
-        attendance_rows=attendance_rows,
-        latest_attendance_updated_at_value=latest_attendance_update,
-        model_path=_relative_path(model_path),
-        artifact_dir=_relative_path(artifact_dir),
-        commit_sha=os.getenv("GITHUB_SHA"),
-    )
     print(f"{location.id}: training started", flush=True)
 
     try:
+        if attendance_rows < args.min_train_size:
+            raise ValueError(f"Only {attendance_rows} attendance rows; need at least {args.min_train_size}.")
         trained_model_path = train_location(
             location_id=location.id,
             min_train_size=args.min_train_size,
             quantile=args.quantile,
         )
         metrics = _load_metrics(location.id)
-        if run_id is not None:
-            update_training_run(
-                run_id,
-                status="success",
-                finished_at=datetime.now(timezone.utc).isoformat(),
-                attendance_rows=attendance_rows,
-                latest_attendance_updated_at=latest_attendance_update,
-                model_path=_relative_path(trained_model_path),
-                artifact_dir=_relative_path(artifact_dir),
-                commit_sha=os.getenv("GITHUB_SHA"),
-                metrics=metrics,
-                error_message=None,
-            )
+        finished_at = datetime.now(timezone.utc).isoformat()
+        create_training_run(
+            location_id=location.id,
+            status="success",
+            finished_at=finished_at,
+            attendance_rows=attendance_rows,
+            latest_attendance_updated_at_value=latest_attendance_update,
+            model_path=_relative_path(trained_model_path),
+            artifact_dir=_relative_path(artifact_dir),
+            commit_sha=os.getenv("GITHUB_SHA"),
+            metrics=metrics,
+            error_message=None,
+        )
+        clear_location_dirty(location.id, finished_at)
         print(f"{location.id}: success - {trained_model_path}", flush=True)
         return "success"
     except Exception as exc:
         error_message = f"{exc}\n{traceback.format_exc(limit=5)}"
-        if run_id is not None:
-            update_training_run(
-                run_id,
-                status="failed",
-                finished_at=datetime.now(timezone.utc).isoformat(),
-                attendance_rows=attendance_rows,
-                latest_attendance_updated_at=latest_attendance_update,
-                model_path=_relative_path(model_path),
-                artifact_dir=_relative_path(artifact_dir),
-                commit_sha=os.getenv("GITHUB_SHA"),
-                error_message=error_message,
-            )
+        mark_location_dirty(location.id, latest_attendance_update)
+        create_training_run(
+            location_id=location.id,
+            status="failed",
+            finished_at=datetime.now(timezone.utc).isoformat(),
+            attendance_rows=attendance_rows,
+            latest_attendance_updated_at_value=latest_attendance_update,
+            model_path=_relative_path(model_path),
+            artifact_dir=_relative_path(artifact_dir),
+            commit_sha=os.getenv("GITHUB_SHA"),
+            error_message=error_message,
+        )
         print(f"{location.id}: failed - {exc}", flush=True)
         return "failed"
 
@@ -189,9 +148,13 @@ def main() -> int:
         print("Supabase is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.", flush=True)
         return 2
 
-    locations = _selected_locations(args)
+    locations = _dirty_locations(args)
+    if not locations:
+        print("No dirty locations to retrain.", flush=True)
+        return 0
+
     print(f"Nightly retrain starting for {len(locations)} location(s). Force={args.force}", flush=True)
-    results = {"success": 0, "skipped": 0, "failed": 0}
+    results = {"success": 0, "failed": 0}
     for location in locations:
         try:
             status = retrain_one_location(location, args)
@@ -202,7 +165,7 @@ def main() -> int:
 
     print(
         "Nightly retrain complete: "
-        f"{results['success']} success, {results['skipped']} skipped, {results['failed']} failed.",
+        f"{results['success']} success, {results['failed']} failed.",
         flush=True,
     )
     return 1 if results["failed"] else 0

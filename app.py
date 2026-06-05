@@ -296,9 +296,11 @@ def render_model_monitoring():
 
 
 def render_data_ops():
-    st.subheader(f"Data CRUD + Incremental Retraining - {selected_name}")
+    st.subheader(f"Data Management - {selected_name}")
     df = load_clean_data(location_id)
 
+    st.markdown("### Attendance Records")
+    st.caption("View and filter historical attendance data.")
     q1, q2 = st.columns(2)
     with q1:
         start = st.date_input("Start date", value=df[DATE_COL].min().date() if not df.empty else None)
@@ -310,16 +312,24 @@ def render_data_ops():
     else:
         show = df.copy()
 
-    st.dataframe(show[[DATE_COL, TARGET_COL]], use_container_width=True, height=260)
+    st.markdown("**Recent Attendance Records**")
+    attendance_display = show[[DATE_COL, TARGET_COL]].copy()
+    if not attendance_display.empty:
+        attendance_display[DATE_COL] = attendance_display[DATE_COL].dt.strftime("%Y-%m-%d")
+    attendance_display = attendance_display.rename(
+        columns={DATE_COL: "Service date", TARGET_COL: "Actual visitors served"}
+    )
+    st.dataframe(attendance_display, use_container_width=True, height=260, hide_index=True)
 
-    st.markdown("**Add / Update record**")
+    st.markdown("### Add or Correct Attendance")
+    st.caption("Add a new attendance record or correct an existing one.")
     a1, a2, a3 = st.columns([2, 2, 1])
     with a1:
         add_date = st.date_input("Service date", value=None, key="add_date")
     with a2:
-        add_visitors = st.number_input("Visitors", min_value=0, max_value=10000, value=120, step=1)
+        add_visitors = st.number_input("Actual visitors served", min_value=0, max_value=10000, value=120, step=1)
     with a3:
-        if st.button("Save record"):
+        if st.button("Save Attendance"):
             if add_date is None:
                 st.error("Please select date")
             else:
@@ -334,29 +344,72 @@ def render_data_ops():
                 if monitoring_updated:
                     st.rerun()
 
-    st.markdown("**Delete record**")
-    del_options = [d.strftime("%Y-%m-%d") for d in df[DATE_COL].sort_values()] if not df.empty else []
-    del_date = st.selectbox("Service date to delete", options=del_options, index=None, placeholder="Select date")
-    if st.button("Delete selected record"):
-        if del_date:
-            delete_record(del_date, location_id)
-            st.success(f"Deleted {del_date}")
+    with st.expander("Advanced Administration", expanded=False):
+        st.markdown("#### Delete Attendance Record")
+        del_options = [d.strftime("%Y-%m-%d") for d in df[DATE_COL].sort_values()] if not df.empty else []
+        del_date = st.selectbox("Service date to delete", options=del_options, index=None, placeholder="Select date")
+        if st.button("Delete Attendance Record"):
+            if del_date:
+                delete_record(del_date, location_id)
+                st.success(f"Deleted {del_date}")
+                st.rerun()
+            else:
+                st.error("Please select date")
+
+        st.markdown("#### Bulk Attendance Editor")
+        st.caption(
+            "Edit multiple attendance records at once. "
+            "Changes are not saved until you click Save Bulk Edits."
+        )
+        edit_df = df[[DATE_COL, TARGET_COL]].copy()
+        if not edit_df.empty:
+            edit_df[DATE_COL] = edit_df[DATE_COL].dt.strftime("%Y-%m-%d")
+        edit_df = st.data_editor(
+            edit_df,
+            num_rows="dynamic",
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                DATE_COL: st.column_config.TextColumn("Service date"),
+                TARGET_COL: st.column_config.NumberColumn("Actual visitors served", min_value=0, step=1),
+            },
+        )
+        if st.button("Save Bulk Edits"):
+            save_clean_data(edit_df, location_id)
+            st.success("Saved")
             st.rerun()
-        else:
-            st.error("Please select date")
 
-    st.markdown("**Bulk edit**")
-    edit_df = st.data_editor(df[[DATE_COL, TARGET_COL]], num_rows="dynamic", use_container_width=True)
-    if st.button("Save bulk edits"):
-        save_clean_data(edit_df, location_id)
-        st.success("Saved")
-        st.rerun()
+        st.markdown("#### Retraining")
+        try:
+            retrain_state = get_retrain_state(location_id)
+            latest_run = latest_training_run(location_id)
+            latest_success = latest_successful_training_run(location_id)
+        except Exception as exc:
+            retrain_state = None
+            latest_run = None
+            latest_success = None
+            st.warning(f"Training status could not be loaded: {exc}")
 
-    if st.button("Incremental retraining", type="primary"):
-        with st.spinner("Training..."):
-            r = subprocess.run(
-                [sys.executable, str(ROOT / "scripts" / "retrain_incremental.py"), "--location", location_id],
-                cwd=ROOT,
+        last_training = latest_success.get("finished_at", "Never") if latest_success else "Never"
+        raw_status = latest_run.get("status") if latest_run else None
+        training_status = raw_status.title() if raw_status else "Never Trained"
+        needs_retraining = "Yes" if retrain_state and retrain_state.get("dirty") else "No"
+        s1, s2, s3 = st.columns(3)
+        s1.metric("Last Training", last_training)
+        s2.metric("Training Status", training_status)
+        s3.metric("Needs Retraining", needs_retraining)
+
+        if st.button("Run Retraining Now", type="primary"):
+            with st.spinner("Training..."):
+                r = subprocess.run(
+                    [sys.executable, str(ROOT / "scripts" / "retrain_incremental.py"), "--location", location_id],
+                    cwd=ROOT,
+                )
+            if r.returncode == 0:
+                st.success("Training completed. Model updated.")
+                st.rerun()
+            else:
+                st.error("Training failed.")
             )
         if r.returncode == 0:
             st.success("Training completed. Model updated.")

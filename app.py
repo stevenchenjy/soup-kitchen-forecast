@@ -410,12 +410,6 @@ def render_data_ops():
                 st.rerun()
             else:
                 st.error("Training failed.")
-            )
-        if r.returncode == 0:
-            st.success("Training completed. Model updated.")
-            st.rerun()
-        else:
-            st.error("Training failed.")
 
 
 def render_master_accounts(users, location_display_row):

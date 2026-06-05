@@ -110,14 +110,24 @@ if sidebar.button("Logout"):
 
 model_path = model_file_for_location(location_id)
 artifact_dir = artifact_dir_for_location(location_id)
-predictor = VisitorPredictor(str(model_path)) if model_path.exists() else None
+predictor = None
+model_load_error = None
+if model_path.exists():
+    try:
+        predictor = VisitorPredictor(str(model_path))
+    except Exception as exc:
+        model_load_error = exc
 
 
 
 def render_prediction():
     st.subheader(f"Prediction - {selected_name}")
     if predictor is None:
-        st.warning(f"Model not found for location '{location_id}'. Train this location first.")
+        if model_path.exists() and model_load_error is not None:
+            st.warning("Model file is incompatible. Please retrain model.")
+            st.caption(f"Load error: {model_load_error}")
+        else:
+            st.warning(f"Model not found for location '{location_id}'. Train this location first.")
         if st.button("Train this location", type="primary"):
             with st.spinner("Training..."):
                 r = subprocess.run(

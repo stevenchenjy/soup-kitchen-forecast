@@ -91,7 +91,13 @@ if sidebar.button("Logout"):
 
 model_path = model_file_for_location(location_id)
 df = load_clean_data(location_id)
-predictor = VisitorPredictor(str(model_path)) if model_path.exists() else None
+predictor = None
+model_load_error = None
+if model_path.exists():
+    try:
+        predictor = VisitorPredictor(str(model_path))
+    except Exception as exc:
+        model_load_error = exc
 cancel_message = st.session_state.pop("staff_cancel_message", None)
 if cancel_message:
     st.success(cancel_message)
@@ -99,7 +105,10 @@ if cancel_message:
 
 st.subheader(f"Daily Actions - {selected_name}")
 if predictor is None:
-    st.warning("Forecast is not ready for this location. Please contact an admin.")
+    if model_path.exists() and model_load_error is not None:
+        st.warning("Model file is incompatible. Please retrain model.")
+    else:
+        st.warning("Forecast is not ready for this location. Please contact an admin.")
 else:
     buf = st.slider(
         "Extra meals safety buffer (%)",

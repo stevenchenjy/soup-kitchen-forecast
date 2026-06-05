@@ -31,7 +31,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Install dependencies
         run: |
@@ -46,8 +46,10 @@ jobs:
           fi
           python scripts/nightly_retrain.py $ARGS
 
+      - name: Validate trained model loading
+        run: python -c "from src.predictor import VisitorPredictor; VisitorPredictor('models/visitor_model_ny_12550.joblib')"
+
       - name: Commit updated models and artifacts
-        if: always()
         run: |
           if git diff --quiet -- models artifacts; then
             echo "No model or artifact changes to commit."

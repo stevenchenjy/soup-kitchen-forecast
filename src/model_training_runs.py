@@ -15,6 +15,7 @@ except ModuleNotFoundError:
 
 ATTENDANCE_TABLE_DEFAULT = "attendance"
 MODEL_TRAINING_RUNS_TABLE_DEFAULT = "model_training_runs"
+MODEL_RETRAIN_STATE_TABLE_DEFAULT = "model_retrain_state"
 
 
 def _streamlit_secret_value(*names: str) -> str | None:
@@ -131,6 +132,14 @@ def _training_runs_table() -> str:
     )
 
 
+def _retrain_state_table() -> str:
+    return _table_name(
+        "SUPABASE_MODEL_RETRAIN_STATE_TABLE",
+        "model_retrain_state_table",
+        MODEL_RETRAIN_STATE_TABLE_DEFAULT,
+    )
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -149,6 +158,76 @@ def latest_attendance_updated_at(location_id: str) -> str | None:
     if isinstance(rows, list) and rows:
         return rows[0].get("updated_at")
     return None
+
+
+def mark_location_dirty(location_id: str, attendance_updated_at: str | None = None) -> None:
+    if not supabase_configured():
+        return
+    now = attendance_updated_at or now_iso()
+    _supabase_request(
+        _retrain_state_table(),
+        "POST",
+        params={"on_conflict": "location_id"},
+        payload={
+            "location_id": location_id,
+            "dirty": True,
+            "last_attendance_updated_at": now,
+            "updated_at": now,
+        },
+        extra_headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
+    )
+
+
+def clear_location_dirty(location_id: str, successful_training_at: str | None = None) -> None:
+    if not supabase_configured():
+        return
+    now = successful_training_at or now_iso()
+    _supabase_request(
+        _retrain_state_table(),
+        "POST",
+        params={"on_conflict": "location_id"},
+        payload={
+            "location_id": location_id,
+            "dirty": False,
+            "last_successful_training_at": now,
+            "updated_at": now,
+        },
+        extra_headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
+    )
+
+
+def get_retrain_state(location_id: str) -> dict[str, Any] | None:
+    if not supabase_configured():
+        return None
+    rows = _supabase_request(
+        _retrain_state_table(),
+        "GET",
+        params={
+            "select": "*",
+            "location_id": f"eq.{location_id}",
+            "limit": "1",
+        },
+    )
+    if isinstance(rows, list) and rows:
+        return rows[0]
+    return None
+
+
+def list_dirty_location_ids() -> list[str]:
+    if not supabase_configured():
+        return []
+    rows = _supabase_request(
+        _retrain_state_table(),
+        "GET",
+        params={
+            "select": "location_id",
+            "dirty": "eq.true",
+            "order": "updated_at.asc.nullslast,location_id.asc",
+        },
+    )
+    if not isinstance(rows, list):
+        return []
+    return [str(row["location_id"]) for row in rows if isinstance(row, dict) and row.get("location_id")]
 
 
 def latest_training_run(location_id: str) -> dict[str, Any] | None:

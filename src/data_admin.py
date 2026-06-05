@@ -12,6 +12,7 @@ from urllib.request import Request, urlopen
 import pandas as pd
 
 from src.config import CLEAN_DATA_FILE, DATE_COL, TARGET_COL, location_db_file
+from src.model_training_runs import mark_location_dirty
 
 try:
     import streamlit as st
@@ -149,6 +150,13 @@ def _supabase_request(
     return json.loads(body) if body else None
 
 
+def _mark_location_dirty(location_id: str, attendance_updated_at: str | None = None) -> None:
+    try:
+        mark_location_dirty(location_id, attendance_updated_at)
+    except Exception:
+        pass
+
+
 def _normalize_attendance_df(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     out[DATE_COL] = pd.to_datetime(out[DATE_COL]).dt.strftime("%Y-%m-%d")
@@ -246,13 +254,14 @@ def _save_clean_data_supabase(df: pd.DataFrame, location_id: str) -> None:
     } if isinstance(existing_rows, list) else set()
     incoming_dates = set(out[DATE_COL].tolist())
 
+    now = datetime.now(timezone.utc).isoformat()
     for stale_date in existing_dates - incoming_dates:
         _delete_supabase_row(location_id, stale_date)
 
     if out.empty:
+        _mark_location_dirty(location_id, now)
         return
 
-    now = datetime.now(timezone.utc).isoformat()
     rows = [
         {
             "location_id": location_id,
@@ -268,6 +277,7 @@ def _save_clean_data_supabase(df: pd.DataFrame, location_id: str) -> None:
         payload=rows,
         extra_headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
     )
+    _mark_location_dirty(location_id, now)
 
 
 def _upsert_record_supabase(service_date: str, visitors: int, location_id: str) -> pd.DataFrame:
@@ -284,12 +294,14 @@ def _upsert_record_supabase(service_date: str, visitors: int, location_id: str) 
         },
         extra_headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
     )
+    _mark_location_dirty(location_id, now)
     return load_clean_data(location_id)
 
 
 def _delete_record_supabase(service_date: str, location_id: str) -> pd.DataFrame:
     dt = pd.to_datetime(service_date).strftime("%Y-%m-%d")
     _delete_supabase_row(location_id, dt)
+    _mark_location_dirty(location_id, datetime.now(timezone.utc).isoformat())
     return load_clean_data(location_id)
 
 

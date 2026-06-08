@@ -1,6 +1,52 @@
+# macOS / editor metadata
 .DS_Store
+**/.DS_Store
 .idea/
-.venv/
-__pycache__/
-*.pyc
+.vscode/
 *.swp
+
+# Python environments and caches
+.venv/
+venv/
+env/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Environment and secret files
+.env
+.env.*
+!.env.example
+secrets.toml
+.streamlit/secrets.toml
+
+# Local databases and SQLite sidecars
+*.db
+*.sqlite
+*.sqlite3
+*.db-shm
+*.db-wal
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3-shm
+*.sqlite3-wal
+data/locations/*/attendance.db
+
+# Cached weather data
+data/weather_daily*.csv
+data/locations/*/weather_daily.csv
+
+# Generated models
+models/*.joblib
+models/*.pkl
+models/*.pickle
+
+# Generated artifacts and run outputs
+artifacts/
+*.log
+*.tmp

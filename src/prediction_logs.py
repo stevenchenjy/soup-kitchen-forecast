@@ -343,7 +343,11 @@ def _actual_update_values(row: dict[str, Any], actual_visitors: int) -> dict[str
     }
 
 
-def update_prediction_logs_with_actual(location_id: str, service_date: str, actual_visitors: int) -> int:
+def set_prediction_logs_actual(
+    location_id: str,
+    service_date: str,
+    actual_visitors: int | None,
+) -> int:
     dt = _service_date(service_date)
     if _supabase_config():
         rows = _supabase_request(
@@ -359,7 +363,11 @@ def update_prediction_logs_with_actual(location_id: str, service_date: str, actu
             return 0
         if not rows:
             return 0
-        values = _actual_update_values(rows[0], actual_visitors)
+        values = (
+            _actual_update_values(rows[0], actual_visitors)
+            if actual_visitors is not None
+            else {"actual_visitors": None, "absolute_error": None, "updated_at": _now()}
+        )
         _supabase_request(
             "PATCH",
             params={"id": f"eq.{rows[0]['id']}"},
@@ -383,25 +391,39 @@ def update_prediction_logs_with_actual(location_id: str, service_date: str, actu
         ).fetchall()
         if not rows:
             return 0
-        values = _actual_update_values(dict(rows[0]), actual_visitors)
-        conn.execute(
-            "UPDATE prediction_logs SET actual_visitors = ?, absolute_error = ?, "
-            "waste_avoided_meals = ?, estimated_co2e_reduction_kg = ?, updated_at = ? WHERE id = ?",
-            (
-                values["actual_visitors"],
-                values["absolute_error"],
-                values["waste_avoided_meals"],
-                values["estimated_co2e_reduction_kg"],
-                values["updated_at"],
-                rows[0]["id"],
-            ),
+        values = (
+            _actual_update_values(dict(rows[0]), actual_visitors)
+            if actual_visitors is not None
+            else {"actual_visitors": None, "absolute_error": None, "updated_at": _now()}
         )
+        if actual_visitors is None:
+            conn.execute(
+                "UPDATE prediction_logs SET actual_visitors = NULL, absolute_error = NULL, updated_at = ? WHERE id = ?",
+                (values["updated_at"], rows[0]["id"]),
+            )
+        else:
+            conn.execute(
+                "UPDATE prediction_logs SET actual_visitors = ?, absolute_error = ?, "
+                "waste_avoided_meals = ?, estimated_co2e_reduction_kg = ?, updated_at = ? WHERE id = ?",
+                (
+                    values["actual_visitors"],
+                    values["absolute_error"],
+                    values["waste_avoided_meals"],
+                    values["estimated_co2e_reduction_kg"],
+                    values["updated_at"],
+                    rows[0]["id"],
+                ),
+            )
         duplicate_ids = [row["id"] for row in rows[1:]]
         if duplicate_ids:
             placeholders = ", ".join("?" for _ in duplicate_ids)
             conn.execute(f"DELETE FROM prediction_logs WHERE id IN ({placeholders})", duplicate_ids)
         conn.commit()
         return len(rows)
+
+
+def update_prediction_logs_with_actual(location_id: str, service_date: str, actual_visitors: int) -> int:
+    return set_prediction_logs_actual(location_id, service_date, int(actual_visitors))
 
 
 def _load_local_logs_for_location(location_id: str, limit: int) -> list[dict[str, Any]]:

@@ -21,12 +21,25 @@ except ModuleNotFoundError:
 
 
 ATTENDANCE_TABLE_DEFAULT = "attendance"
+ATTENDANCE_CHANGE_LOG_TABLE_DEFAULT = "attendance_change_log"
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS attendance (
     service_date TEXT PRIMARY KEY,
     visitors INTEGER NOT NULL CHECK (visitors >= 0)
 );
+CREATE TABLE IF NOT EXISTS attendance_change_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    location_id TEXT NOT NULL,
+    service_date TEXT NOT NULL,
+    operation TEXT NOT NULL CHECK (operation IN ('ADD', 'UPDATE', 'DELETE')),
+    previous_visitors INTEGER,
+    new_visitors INTEGER,
+    changed_by TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_attendance_change_log_undo
+ON attendance_change_log(location_id, changed_by, created_at DESC, id DESC);
 """
 
 
@@ -35,7 +48,8 @@ def _connect(location_id: str) -> sqlite3.Connection:
     db = location_db_file(location_id)
     db.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db)
-    conn.execute(SCHEMA_SQL)
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA_SQL)
     conn.commit()
     return conn
 
@@ -127,11 +141,11 @@ def _supabase_headers(extra: dict[str, str] | None = None) -> dict[str, str]:
     return headers
 
 
-def _supabase_url() -> str:
+def _supabase_url(table: str | None = None) -> str:
     config = _supabase_config()
     if config is None:
         raise RuntimeError("Supabase is not configured.")
-    return f"{config['url']}/rest/v1/{config['table']}"
+    return f"{config['url']}/rest/v1/{table or config['table']}"
 
 
 def _supabase_request(
@@ -139,8 +153,9 @@ def _supabase_request(
     params: dict[str, str] | None = None,
     payload: Any | None = None,
     extra_headers: dict[str, str] | None = None,
+    table: str | None = None,
 ) -> Any:
-    url = _supabase_url()
+    url = _supabase_url(table)
     if params:
         url = f"{url}?{urlencode(params)}"
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
@@ -148,6 +163,48 @@ def _supabase_request(
     with urlopen(request, timeout=10) as response:
         body = response.read().decode("utf-8")
     return json.loads(body) if body else None
+
+
+def _change_log_table() -> str:
+    return _secret_value("SUPABASE_ATTENDANCE_CHANGE_LOG_TABLE", "attendance_change_log_table") or ATTENDANCE_CHANGE_LOG_TABLE_DEFAULT
+
+
+def _change_row(
+    location_id: str,
+    service_date: str,
+    operation: str,
+    previous_visitors: int | None,
+    new_visitors: int | None,
+    changed_by: str,
+) -> dict[str, Any]:
+    return {
+        "location_id": location_id,
+        "service_date": service_date,
+        "operation": operation,
+        "previous_visitors": previous_visitors,
+        "new_visitors": new_visitors,
+        "changed_by": changed_by,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _insert_change_supabase(change: dict[str, Any]) -> int | str | None:
+    rows = _supabase_request(
+        "POST",
+        payload=change,
+        extra_headers={"Prefer": "return=representation"},
+        table=_change_log_table(),
+    )
+    return rows[0].get("id") if isinstance(rows, list) and rows else None
+
+
+def _delete_change_supabase(change_id: int | str) -> None:
+    _supabase_request(
+        "DELETE",
+        params={"id": f"eq.{change_id}"},
+        extra_headers={"Prefer": "return=minimal"},
+        table=_change_log_table(),
+    )
 
 
 def _mark_location_dirty(location_id: str, attendance_updated_at: str | None = None) -> None:
@@ -192,10 +249,25 @@ def _save_clean_data_sqlite(df: pd.DataFrame, location_id: str) -> None:
         conn.commit()
 
 
-def _upsert_record_sqlite(service_date: str, visitors: int, location_id: str) -> pd.DataFrame:
+def _upsert_record_sqlite(
+    service_date: str,
+    visitors: int,
+    location_id: str,
+    changed_by: str | None = None,
+) -> pd.DataFrame:
     dt = pd.to_datetime(service_date).strftime("%Y-%m-%d")
     v = int(visitors)
     with _connect(location_id) as conn:
+        previous = conn.execute("SELECT visitors FROM attendance WHERE service_date = ?", (dt,)).fetchone()
+        if changed_by:
+            operation = "UPDATE" if previous else "ADD"
+            change = _change_row(location_id, dt, operation, int(previous["visitors"]) if previous else None, v, changed_by)
+            conn.execute(
+                "INSERT INTO attendance_change_log "
+                "(location_id, service_date, operation, previous_visitors, new_visitors, changed_by, created_at) "
+                "VALUES (:location_id, :service_date, :operation, :previous_visitors, :new_visitors, :changed_by, :created_at)",
+                change,
+            )
         conn.execute(
             "INSERT INTO attendance(service_date, visitors) VALUES(?, ?) "
             "ON CONFLICT(service_date) DO UPDATE SET visitors=excluded.visitors",
@@ -205,9 +277,22 @@ def _upsert_record_sqlite(service_date: str, visitors: int, location_id: str) ->
     return load_clean_data(location_id)
 
 
-def _delete_record_sqlite(service_date: str, location_id: str) -> pd.DataFrame:
+def _delete_record_sqlite(
+    service_date: str,
+    location_id: str,
+    changed_by: str | None = None,
+) -> pd.DataFrame:
     dt = pd.to_datetime(service_date).strftime("%Y-%m-%d")
     with _connect(location_id) as conn:
+        previous = conn.execute("SELECT visitors FROM attendance WHERE service_date = ?", (dt,)).fetchone()
+        if changed_by and previous:
+            change = _change_row(location_id, dt, "DELETE", int(previous["visitors"]), None, changed_by)
+            conn.execute(
+                "INSERT INTO attendance_change_log "
+                "(location_id, service_date, operation, previous_visitors, new_visitors, changed_by, created_at) "
+                "VALUES (:location_id, :service_date, :operation, :previous_visitors, :new_visitors, :changed_by, :created_at)",
+                change,
+            )
         conn.execute("DELETE FROM attendance WHERE service_date = ?", (dt,))
         conn.commit()
     return load_clean_data(location_id)
@@ -280,27 +365,74 @@ def _save_clean_data_supabase(df: pd.DataFrame, location_id: str) -> None:
     _mark_location_dirty(location_id, now)
 
 
-def _upsert_record_supabase(service_date: str, visitors: int, location_id: str) -> pd.DataFrame:
+def _upsert_record_supabase(
+    service_date: str,
+    visitors: int,
+    location_id: str,
+    changed_by: str | None = None,
+) -> pd.DataFrame:
     dt = pd.to_datetime(service_date).strftime("%Y-%m-%d")
     now = datetime.now(timezone.utc).isoformat()
-    _supabase_request(
-        "POST",
-        params={"on_conflict": "location_id,service_date"},
-        payload={
-            "location_id": location_id,
-            "service_date": dt,
-            "visitors": int(visitors),
-            "updated_at": now,
-        },
-        extra_headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
-    )
+    change_id = None
+    if changed_by:
+        existing = _supabase_request(
+            "GET",
+            params={"select": "visitors", "location_id": f"eq.{location_id}", "service_date": f"eq.{dt}", "limit": "1"},
+        )
+        previous = int(existing[0]["visitors"]) if isinstance(existing, list) and existing else None
+        change_id = _insert_change_supabase(
+            _change_row(
+                location_id,
+                dt,
+                "UPDATE" if previous is not None else "ADD",
+                previous,
+                int(visitors),
+                changed_by,
+            )
+        )
+    try:
+        _supabase_request(
+            "POST",
+            params={"on_conflict": "location_id,service_date"},
+            payload={
+                "location_id": location_id,
+                "service_date": dt,
+                "visitors": int(visitors),
+                "updated_at": now,
+            },
+            extra_headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
+        )
+    except Exception:
+        # A failed write must not leave a rollback entry for a change that never happened.
+        if change_id is not None:
+            _delete_change_supabase(change_id)
+        raise
     _mark_location_dirty(location_id, now)
     return load_clean_data(location_id)
 
 
-def _delete_record_supabase(service_date: str, location_id: str) -> pd.DataFrame:
+def _delete_record_supabase(
+    service_date: str,
+    location_id: str,
+    changed_by: str | None = None,
+) -> pd.DataFrame:
     dt = pd.to_datetime(service_date).strftime("%Y-%m-%d")
-    _delete_supabase_row(location_id, dt)
+    change_id = None
+    if changed_by:
+        existing = _supabase_request(
+            "GET",
+            params={"select": "visitors", "location_id": f"eq.{location_id}", "service_date": f"eq.{dt}", "limit": "1"},
+        )
+        if isinstance(existing, list) and existing:
+            change_id = _insert_change_supabase(
+                _change_row(location_id, dt, "DELETE", int(existing[0]["visitors"]), None, changed_by)
+            )
+    try:
+        _delete_supabase_row(location_id, dt)
+    except Exception:
+        if change_id is not None:
+            _delete_change_supabase(change_id)
+        raise
     _mark_location_dirty(location_id, datetime.now(timezone.utc).isoformat())
     return load_clean_data(location_id)
 
@@ -343,14 +475,117 @@ def save_clean_data(df: pd.DataFrame, location_id: str) -> None:
 
 
 
-def upsert_record(service_date: str, visitors: int, location_id: str) -> pd.DataFrame:
+def upsert_record(
+    service_date: str,
+    visitors: int,
+    location_id: str,
+    changed_by: str | None = None,
+) -> pd.DataFrame:
     if _supabase_config():
-        return _upsert_record_supabase(service_date, visitors, location_id)
-    return _upsert_record_sqlite(service_date, visitors, location_id)
+        return _upsert_record_supabase(service_date, visitors, location_id, changed_by)
+    return _upsert_record_sqlite(service_date, visitors, location_id, changed_by)
 
 
 
-def delete_record(service_date: str, location_id: str) -> pd.DataFrame:
+def delete_record(
+    service_date: str,
+    location_id: str,
+    changed_by: str | None = None,
+) -> pd.DataFrame:
     if _supabase_config():
-        return _delete_record_supabase(service_date, location_id)
-    return _delete_record_sqlite(service_date, location_id)
+        return _delete_record_supabase(service_date, location_id, changed_by)
+    return _delete_record_sqlite(service_date, location_id, changed_by)
+
+
+def latest_attendance_change(location_id: str, changed_by: str) -> dict[str, Any] | None:
+    if _supabase_config():
+        rows = _supabase_request(
+            "GET",
+            params={
+                "select": "*",
+                "location_id": f"eq.{location_id}",
+                "changed_by": f"eq.{changed_by}",
+                "order": "created_at.desc,id.desc",
+                "limit": "1",
+            },
+            table=_change_log_table(),
+        )
+        return dict(rows[0]) if isinstance(rows, list) and rows else None
+
+    with _connect(location_id) as conn:
+        row = conn.execute(
+            "SELECT * FROM attendance_change_log WHERE location_id = ? AND changed_by = ? "
+            "ORDER BY created_at DESC, id DESC LIMIT 1",
+            (location_id, changed_by),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def _apply_undo(change: dict[str, Any]) -> None:
+    location_id = str(change["location_id"])
+    service_date = str(change["service_date"])
+    operation = str(change["operation"])
+    if operation == "ADD":
+        if _supabase_config():
+            _delete_supabase_row(location_id, service_date)
+        else:
+            with _connect(location_id) as conn:
+                conn.execute("DELETE FROM attendance WHERE service_date = ?", (service_date,))
+                conn.commit()
+        return
+
+    previous_visitors = int(change["previous_visitors"])
+    if _supabase_config():
+        _supabase_request(
+            "POST",
+            params={"on_conflict": "location_id,service_date"},
+            payload={
+                "location_id": location_id,
+                "service_date": service_date,
+                "visitors": previous_visitors,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            extra_headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
+        )
+    else:
+        with _connect(location_id) as conn:
+            conn.execute(
+                "INSERT INTO attendance(service_date, visitors) VALUES(?, ?) "
+                "ON CONFLICT(service_date) DO UPDATE SET visitors=excluded.visitors",
+                (service_date, previous_visitors),
+            )
+            conn.commit()
+
+
+def _consume_undo_history(location_id: str, changed_by: str) -> None:
+    if _supabase_config():
+        _supabase_request(
+            "DELETE",
+            params={"location_id": f"eq.{location_id}", "changed_by": f"eq.{changed_by}"},
+            extra_headers={"Prefer": "return=minimal"},
+            table=_change_log_table(),
+        )
+        return
+    with _connect(location_id) as conn:
+        conn.execute(
+            "DELETE FROM attendance_change_log WHERE location_id = ? AND changed_by = ?",
+            (location_id, changed_by),
+        )
+        conn.commit()
+
+
+def undo_last_attendance_input(location_id: str, changed_by: str) -> dict[str, Any] | None:
+    change = latest_attendance_change(location_id, changed_by)
+    if change is None:
+        return None
+
+    _apply_undo(change)
+
+    # Keep prediction monitoring aligned before consuming the only available undo.
+    from src.prediction_logs import set_prediction_logs_actual
+
+    actual = None if change["operation"] == "ADD" else int(change["previous_visitors"])
+    set_prediction_logs_actual(location_id, str(change["service_date"]), actual)
+    _consume_undo_history(location_id, changed_by)
+    _mark_location_dirty(location_id, datetime.now(timezone.utc).isoformat())
+    return change

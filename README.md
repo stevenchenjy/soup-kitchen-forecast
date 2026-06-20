@@ -166,6 +166,7 @@ After training, the location will be available in the app location list.
 - Use Python 3.12 in Streamlit Cloud and GitHub Actions.
 - Deploy `app.py` as the admin app and `app_staff.py` as the staff app.
 - Configure Supabase secrets for shared storage and nightly retraining.
+- Run `scripts/create_attendance_change_log.sql` in Supabase before deploying the staff undo feature.
 - Keep service-role keys and other secrets out of Git.
 - Review generated model and artifact publishing intentionally; they may be large, stale, or environment-specific.
 
@@ -177,10 +178,10 @@ SUPABASE_SERVICE_ROLE_KEY
 SUPABASE_ANON_KEY
 SUPABASE_USERS_TABLE
 SUPABASE_ATTENDANCE_TABLE
+SUPABASE_ATTENDANCE_CHANGE_LOG_TABLE
 SUPABASE_PREDICTION_LOGS_TABLE
 SUPABASE_MODEL_TRAINING_RUNS_TABLE
 SUPABASE_MODEL_RETRAIN_STATE_TABLE
 ```
 
 See `DEPLOYMENT.md` for the current deployment checklist.
-

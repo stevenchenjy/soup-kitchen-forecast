@@ -1,3 +1,6 @@
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 import streamlit as st
 
 from src.auth import authenticate_user, get_authorized_locations, get_user, require_role
@@ -6,9 +9,10 @@ from src.config import (
     KG_CO2E_PER_KG_FOOD_WASTE,
     MEAL_WEIGHT_KG,
     TARGET_COL,
+    TIMEZONE,
     model_file_for_location,
 )
-from src.data_admin import delete_record, load_clean_data, upsert_record
+from src.data_admin import latest_attendance_change, load_clean_data, undo_last_attendance_input, upsert_record
 from src.location_config import list_locations
 from src.prediction_logs import save_prediction_log, update_prediction_logs_with_actual
 from src.predictor import VisitorPredictor
@@ -98,10 +102,9 @@ if model_path.exists():
         predictor = VisitorPredictor(str(model_path))
     except Exception as exc:
         model_load_error = exc
-cancel_message = st.session_state.pop("staff_cancel_message", None)
-if cancel_message:
-    st.success(cancel_message)
-    st.warning("Matching prediction log actuals are not cleared automatically yet.")
+undo_message = st.session_state.pop("staff_undo_message", None)
+if undo_message:
+    st.success(undo_message)
 
 st.subheader(f"Daily Actions - {selected_name}")
 if predictor is None:
@@ -144,7 +147,7 @@ add_date = st.date_input("Service date", value=None, key="staff_add_date")
 add_visitors = st.number_input("Actual visitors served", min_value=0, max_value=10000, value=120, step=1)
 if st.button("Add / Update"):
     if add_date is not None:
-        upsert_record(str(add_date), int(add_visitors), location_id)
+        upsert_record(str(add_date), int(add_visitors), location_id, changed_by=user["username"])
         monitoring_updated = True
         try:
             update_prediction_logs_with_actual(location_id, str(add_date), int(add_visitors))
@@ -162,16 +165,67 @@ if not df.empty:
     recent_df = recent_df.rename(columns={"service_date": "Service date", TARGET_COL: "Actual visitors served"})
     st.dataframe(recent_df, use_container_width=True, hide_index=True, height=300)
 
-    latest_date = recent_df.iloc[0]["Service date"]
-    st.markdown("**Cancel latest entry**")
-    with st.form("cancel_latest_entry"):
-        st.write(f"Do you want to cancel the input on {latest_date}?")
-        confirm_cancel = st.checkbox("Yes, cancel this latest entry")
-        cancel_ok = st.form_submit_button("Cancel latest entry")
-    if cancel_ok:
-        if not confirm_cancel:
-            st.error("Please confirm before canceling the latest entry.")
+    with st.expander("View full attendance history", expanded=False):
+        filter_start, filter_end = st.columns(2)
+        with filter_start:
+            history_start = st.date_input(
+                "Start date",
+                value=df["service_date"].min().date(),
+                key="staff_history_start",
+            )
+        with filter_end:
+            history_end = st.date_input(
+                "End date",
+                value=df["service_date"].max().date(),
+                key="staff_history_end",
+            )
+
+        history_df = df[["service_date", TARGET_COL]].copy()
+        if history_start > history_end:
+            st.warning("Start date must be on or before end date.")
+            history_df = history_df.iloc[0:0]
         else:
-            delete_record(latest_date, location_id)
-            st.session_state["staff_cancel_message"] = f"Canceled latest entry for {latest_date}."
-            st.rerun()
+            history_df = history_df[
+                (history_df["service_date"].dt.date >= history_start)
+                & (history_df["service_date"].dt.date <= history_end)
+            ]
+
+        history_df = history_df.sort_values("service_date", ascending=False)
+        history_df["service_date"] = history_df["service_date"].dt.strftime("%Y-%m-%d")
+        history_df = history_df.rename(
+            columns={"service_date": "Service date", TARGET_COL: "Actual visitors served"}
+        )
+        st.dataframe(history_df, use_container_width=True, hide_index=True)
+
+
+st.markdown("**Undo Last Input**")
+latest_change = latest_attendance_change(location_id, user["username"])
+if latest_change is None:
+    st.caption("No attendance input is available to undo for you at this location.")
+else:
+    operation_labels = {
+        "ADD": "Added attendance",
+        "UPDATE": "Updated attendance",
+        "DELETE": "Deleted attendance",
+    }
+    changed_at = datetime.fromisoformat(str(latest_change["created_at"]).replace("Z", "+00:00"))
+    if changed_at.tzinfo is not None:
+        changed_at = changed_at.astimezone(ZoneInfo(TIMEZONE))
+    st.write(f"Last change: {operation_labels.get(latest_change['operation'], latest_change['operation'])}")
+    st.write(f"Date: {latest_change['service_date']}")
+    st.write(f"Previous: {latest_change['previous_visitors'] if latest_change['previous_visitors'] is not None else '—'}")
+    st.write(f"New: {latest_change['new_visitors'] if latest_change['new_visitors'] is not None else '—'}")
+    st.write(f"Time: {changed_at:%Y-%m-%d %H:%M}")
+    with st.form("undo_last_input"):
+        confirm_undo = st.checkbox("Yes, undo this change")
+        undo_ok = st.form_submit_button("Undo Last Input")
+    if undo_ok:
+        if not confirm_undo:
+            st.error("Please confirm before undoing this change.")
+        else:
+            undone = undo_last_attendance_input(location_id, user["username"])
+            if undone is None:
+                st.error("That change is no longer available to undo.")
+            else:
+                st.session_state["staff_undo_message"] = "Your last attendance input was undone."
+                st.rerun()

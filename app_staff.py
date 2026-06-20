@@ -1,6 +1,3 @@
-from datetime import datetime
-from zoneinfo import ZoneInfo
-
 import streamlit as st
 
 from src.auth import authenticate_user, get_authorized_locations, get_user, require_role
@@ -9,10 +6,14 @@ from src.config import (
     KG_CO2E_PER_KG_FOOD_WASTE,
     MEAL_WEIGHT_KG,
     TARGET_COL,
-    TIMEZONE,
     model_file_for_location,
 )
-from src.data_admin import latest_attendance_change, load_clean_data, undo_last_attendance_input, upsert_record
+from src.data_admin import (
+    delete_latest_staff_created_attendance,
+    latest_staff_created_attendance,
+    load_clean_data,
+    upsert_record,
+)
 from src.location_config import list_locations
 from src.prediction_logs import save_prediction_log, update_prediction_logs_with_actual
 from src.predictor import VisitorPredictor
@@ -102,9 +103,9 @@ if model_path.exists():
         predictor = VisitorPredictor(str(model_path))
     except Exception as exc:
         model_load_error = exc
-undo_message = st.session_state.pop("staff_undo_message", None)
-if undo_message:
-    st.success(undo_message)
+delete_message = st.session_state.pop("staff_delete_message", None)
+if delete_message:
+    st.success(delete_message)
 
 st.subheader(f"Daily Actions - {selected_name}")
 if predictor is None:
@@ -198,34 +199,30 @@ if not df.empty:
         st.dataframe(history_df, use_container_width=True, hide_index=True)
 
 
-st.markdown("**Undo Last Input**")
-latest_change = latest_attendance_change(location_id, user["username"])
-if latest_change is None:
-    st.caption("No attendance input is available to undo for you at this location.")
+st.markdown("**Delete My Latest Attendance Entry**")
+latest_entry = latest_staff_created_attendance(location_id, user["username"])
+if latest_entry is None:
+    st.caption("No recent attendance entry found for your account.")
 else:
-    operation_labels = {
-        "ADD": "Added attendance",
-        "UPDATE": "Updated attendance",
-        "DELETE": "Deleted attendance",
-    }
-    changed_at = datetime.fromisoformat(str(latest_change["created_at"]).replace("Z", "+00:00"))
-    if changed_at.tzinfo is not None:
-        changed_at = changed_at.astimezone(ZoneInfo(TIMEZONE))
-    st.write(f"Last change: {operation_labels.get(latest_change['operation'], latest_change['operation'])}")
-    st.write(f"Date: {latest_change['service_date']}")
-    st.write(f"Previous: {latest_change['previous_visitors'] if latest_change['previous_visitors'] is not None else '—'}")
-    st.write(f"New: {latest_change['new_visitors'] if latest_change['new_visitors'] is not None else '—'}")
-    st.write(f"Time: {changed_at:%Y-%m-%d %H:%M}")
-    with st.form("undo_last_input"):
-        confirm_undo = st.checkbox("Yes, undo this change")
-        undo_ok = st.form_submit_button("Undo Last Input")
-    if undo_ok:
-        if not confirm_undo:
-            st.error("Please confirm before undoing this change.")
+    st.write("Latest attendance entry you created:")
+    st.write(f"Date: {latest_entry['service_date']}")
+    st.write(f"Visitors: {latest_entry['visitors']}")
+    st.caption(
+        "This removes the most recent attendance entry you created for this location. "
+        "You can enter the correct value again afterward."
+    )
+    with st.form("delete_latest_staff_attendance"):
+        confirm_delete = st.checkbox("Yes, delete this attendance entry")
+        delete_ok = st.form_submit_button("Delete My Latest Attendance Entry")
+    if delete_ok:
+        if not confirm_delete:
+            st.error("Please confirm before deleting this attendance entry.")
         else:
-            undone = undo_last_attendance_input(location_id, user["username"])
-            if undone is None:
-                st.error("That change is no longer available to undo.")
+            deleted = delete_latest_staff_created_attendance(location_id, user["username"])
+            if deleted is None:
+                st.error("That attendance entry is no longer available to delete.")
             else:
-                st.session_state["staff_undo_message"] = "Your last attendance input was undone."
+                st.session_state["staff_delete_message"] = (
+                    f"Deleted your attendance entry for {deleted['service_date']}."
+                )
                 st.rerun()

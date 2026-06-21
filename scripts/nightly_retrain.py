@@ -78,6 +78,38 @@ def _latest_attendance_update(location_id: str) -> str | None:
     return latest_attendance_updated_at(location_id)
 
 
+def _print_summary(
+    *,
+    locations_checked: int,
+    trained_locations: list[str],
+    failed_locations: list[str],
+    reason: str | None = None,
+) -> None:
+    lines = [
+        "Nightly retrain summary:",
+        f"- Locations checked: {locations_checked}",
+        f"- Locations trained: {len(trained_locations)}",
+    ]
+    if trained_locations:
+        lines.append(f"- Trained locations: {', '.join(trained_locations)}")
+    lines.append(f"- Locations failed: {len(failed_locations)}")
+    if failed_locations:
+        lines.append(f"- Failed locations: {', '.join(failed_locations)}")
+    if reason:
+        lines.append(f"- Reason: {reason}")
+
+    summary = "\n".join(lines)
+    print(summary, flush=True)
+
+    step_summary_path = os.getenv("GITHUB_STEP_SUMMARY")
+    if step_summary_path:
+        try:
+            with Path(step_summary_path).open("a", encoding="utf-8") as step_summary:
+                step_summary.write(summary + "\n")
+        except OSError as exc:
+            print(f"Warning: could not write GitHub Actions step summary: {exc}", flush=True)
+
+
 def retrain_one_location(location: Location, args: argparse.Namespace) -> str:
     print(f"=== {location.id}: checking attendance ===", flush=True)
     attendance_df = load_clean_data(location.id)
@@ -148,27 +180,37 @@ def main() -> int:
         print("Supabase is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.", flush=True)
         return 2
 
+    locations_checked = len(_selected_locations(args))
     locations = _dirty_locations(args)
     if not locations:
-        print("No dirty locations to retrain.", flush=True)
+        _print_summary(
+            locations_checked=locations_checked,
+            trained_locations=[],
+            failed_locations=[],
+            reason="no dirty locations to retrain",
+        )
         return 0
 
     print(f"Nightly retrain starting for {len(locations)} location(s). Force={args.force}", flush=True)
-    results = {"success": 0, "failed": 0}
+    trained_locations: list[str] = []
+    failed_locations: list[str] = []
     for location in locations:
         try:
             status = retrain_one_location(location, args)
         except Exception as exc:
             status = "failed"
             print(f"{location.id}: failed before run record could be completed - {exc}", flush=True)
-        results[status] += 1
+        if status == "success":
+            trained_locations.append(location.id)
+        else:
+            failed_locations.append(location.id)
 
-    print(
-        "Nightly retrain complete: "
-        f"{results['success']} success, {results['failed']} failed.",
-        flush=True,
+    _print_summary(
+        locations_checked=locations_checked,
+        trained_locations=trained_locations,
+        failed_locations=failed_locations,
     )
-    return 1 if results["failed"] else 0
+    return 1 if failed_locations else 0
 
 
 if __name__ == "__main__":

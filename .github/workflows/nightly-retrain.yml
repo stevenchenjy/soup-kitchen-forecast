@@ -64,13 +64,22 @@ jobs:
 
       - name: Commit updated models and artifacts
         run: |
-          if git diff --quiet -- models artifacts; then
+          shopt -s nullglob
+          for model_path in models/visitor_model_*.joblib; do
+            location_id="${model_path#models/visitor_model_}"
+            location_id="${location_id%.joblib}"
+            git add -f -- "$model_path"
+            if [ -d "artifacts/$location_id" ]; then
+              git add -f -- "artifacts/$location_id/"
+            fi
+          done
+
+          if git diff --cached --quiet -- models artifacts; then
             echo "No model or artifact changes to commit."
             exit 0
           fi
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add models artifacts
           git commit -m "chore: update nightly trained models"
           git push origin main

@@ -82,6 +82,7 @@ def _print_summary(
     *,
     locations_checked: int,
     trained_locations: list[str],
+    skipped_locations: list[str],
     failed_locations: list[str],
     reason: str | None = None,
 ) -> None:
@@ -92,6 +93,9 @@ def _print_summary(
     ]
     if trained_locations:
         lines.append(f"- Trained locations: {', '.join(trained_locations)}")
+    lines.append(f"- Locations skipped due to insufficient data: {len(skipped_locations)}")
+    if skipped_locations:
+        lines.append(f"- Skipped locations: {', '.join(skipped_locations)}")
     lines.append(f"- Locations failed: {len(failed_locations)}")
     if failed_locations:
         lines.append(f"- Failed locations: {', '.join(failed_locations)}")
@@ -114,6 +118,14 @@ def retrain_one_location(location: Location, args: argparse.Namespace) -> str:
     print(f"=== {location.id}: checking attendance ===", flush=True)
     attendance_df = load_clean_data(location.id)
     attendance_rows = int(len(attendance_df))
+    if attendance_rows < args.min_train_size:
+        print(
+            f"{location.id}: skipped - only {attendance_rows} attendance rows; "
+            f"need at least {args.min_train_size}",
+            flush=True,
+        )
+        return "skipped"
+
     latest_attendance_update = _latest_attendance_update(location.id)
     model_path = model_file_for_location(location.id)
     artifact_dir = artifact_dir_for_location(location.id)
@@ -121,8 +133,6 @@ def retrain_one_location(location: Location, args: argparse.Namespace) -> str:
     print(f"{location.id}: training started", flush=True)
 
     try:
-        if attendance_rows < args.min_train_size:
-            raise ValueError(f"Only {attendance_rows} attendance rows; need at least {args.min_train_size}.")
         trained_model_path = train_location(
             location_id=location.id,
             min_train_size=args.min_train_size,
@@ -186,6 +196,7 @@ def main() -> int:
         _print_summary(
             locations_checked=locations_checked,
             trained_locations=[],
+            skipped_locations=[],
             failed_locations=[],
             reason="no dirty locations to retrain",
         )
@@ -193,6 +204,7 @@ def main() -> int:
 
     print(f"Nightly retrain starting for {len(locations)} location(s). Force={args.force}", flush=True)
     trained_locations: list[str] = []
+    skipped_locations: list[str] = []
     failed_locations: list[str] = []
     for location in locations:
         try:
@@ -202,12 +214,15 @@ def main() -> int:
             print(f"{location.id}: failed before run record could be completed - {exc}", flush=True)
         if status == "success":
             trained_locations.append(location.id)
+        elif status == "skipped":
+            skipped_locations.append(location.id)
         else:
             failed_locations.append(location.id)
 
     _print_summary(
         locations_checked=locations_checked,
         trained_locations=trained_locations,
+        skipped_locations=skipped_locations,
         failed_locations=failed_locations,
     )
     return 1 if failed_locations else 0

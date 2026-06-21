@@ -196,6 +196,44 @@ def clear_location_dirty(location_id: str, successful_training_at: str | None = 
     )
 
 
+def clear_location_dirty_if_unchanged(
+    location_id: str,
+    expected_attendance_updated_at: str | None,
+    successful_training_at: str | None = None,
+) -> bool:
+    """Clear dirty state only if attendance has not changed since training read it."""
+    if not supabase_configured():
+        return False
+
+    state = get_retrain_state(location_id)
+    if state is None:
+        # There is no dirty marker to clear. Avoid an upsert that could overwrite
+        # a marker created concurrently by a new attendance write.
+        return True
+
+    now = successful_training_at or now_iso()
+    attendance_filter = (
+        f"eq.{expected_attendance_updated_at}"
+        if expected_attendance_updated_at is not None
+        else "is.null"
+    )
+    rows = _supabase_request(
+        _retrain_state_table(),
+        "PATCH",
+        params={
+            "location_id": f"eq.{location_id}",
+            "last_attendance_updated_at": attendance_filter,
+        },
+        payload={
+            "dirty": False,
+            "last_successful_training_at": now,
+            "updated_at": now,
+        },
+        extra_headers={"Prefer": "return=representation"},
+    )
+    return isinstance(rows, list) and bool(rows)
+
+
 def get_retrain_state(location_id: str) -> dict[str, Any] | None:
     if not supabase_configured():
         return None

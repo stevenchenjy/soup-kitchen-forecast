@@ -18,7 +18,6 @@ from src.config import artifact_dir_for_location, model_file_for_location
 from src.data_admin import load_clean_data
 from src.location_config import Location, list_locations
 from src.model_training_runs import (
-    clear_location_dirty,
     create_training_run,
     get_retrain_state,
     latest_attendance_updated_at,
@@ -152,7 +151,6 @@ def retrain_one_location(location: Location, args: argparse.Namespace) -> str:
             metrics=metrics,
             error_message=None,
         )
-        clear_location_dirty(location.id, finished_at)
         print(f"{location.id}: success - {trained_model_path}", flush=True)
         return "success"
     except Exception as exc:
@@ -179,6 +177,10 @@ def parse_args() -> argparse.Namespace:
     target.add_argument("--location", help="Train one location ID from data/locations.json")
     target.add_argument("--all", action="store_true", help="Check all configured locations")
     parser.add_argument("--force", action="store_true", help="Retrain even if attendance has not changed")
+    parser.add_argument(
+        "--trained-locations-file",
+        help="Optional file to receive successfully trained location IDs for post-publication finalization",
+    )
     parser.add_argument("--min-train-size", type=int, default=18)
     parser.add_argument("--quantile", type=float, default=0.8)
     return parser.parse_args()
@@ -186,6 +188,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    trained_locations_file = Path(args.trained_locations_file) if args.trained_locations_file else None
+    if trained_locations_file:
+        trained_locations_file.parent.mkdir(parents=True, exist_ok=True)
+        trained_locations_file.write_text("", encoding="utf-8")
+
     if not supabase_configured():
         print("Supabase is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.", flush=True)
         return 2
@@ -225,6 +232,8 @@ def main() -> int:
         skipped_locations=skipped_locations,
         failed_locations=failed_locations,
     )
+    if trained_locations_file and trained_locations:
+        trained_locations_file.write_text("\n".join(trained_locations) + "\n", encoding="utf-8")
     return 1 if failed_locations else 0
 
 

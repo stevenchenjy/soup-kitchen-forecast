@@ -14,9 +14,14 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: nightly-retrain-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   retrain:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -40,46 +45,81 @@ jobs:
 
       - name: Run nightly retraining
         run: |
-          ARGS="--all"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ github.event.inputs.force }}" = "true" ]; then
-            ARGS="$ARGS --force"
+          ARGS=(--all --trained-locations-file "$RUNNER_TEMP/nightly-retrained-locations.txt")
+          if [ "${{ inputs.force }}" = "true" ]; then
+            ARGS+=(--force)
           fi
-          python scripts/nightly_retrain.py $ARGS
+
+          echo "Workflow event: ${{ github.event_name }}"
+          echo "Force input: ${{ github.event.inputs.force }}"
+          printf "Final retrain args:"
+          printf " %q" "${ARGS[@]}"
+          printf "\n"
+          echo "Head SHA: $(git rev-parse HEAD)"
+          echo "Branch/ref: ${{ github.ref }}"
+
+          python scripts/nightly_retrain.py "${ARGS[@]}"
+
+      - name: Stage trained models and artifacts
+        run: |
+          while IFS= read -r location_id; do
+            [ -n "$location_id" ] || continue
+            model_path="models/visitor_model_${location_id}.joblib"
+            artifact_path="artifacts/$location_id"
+
+            if [ ! -f "$model_path" ]; then
+              echo "Expected trained model not found: $model_path"
+              exit 1
+            fi
+
+            git add -f -- "$model_path"
+            if [ -d "$artifact_path" ]; then
+              git add -f -- "$artifact_path/"
+            fi
+          done < "$RUNNER_TEMP/nightly-retrained-locations.txt"
+
+          echo "Staged model/artifact changes:"
+          git diff --cached --stat -- models artifacts
 
       - name: Validate trained model loading
         run: |
-          if git diff --quiet -- models; then
-            echo "No changed model files to validate."
+          mapfile -t MODEL_PATHS < <(
+            {
+              git diff --cached --name-only --diff-filter=AM -- models |
+                grep '^models/visitor_model_.*\.joblib$' || true
+              while IFS= read -r location_id; do
+                [ -n "$location_id" ] || continue
+                echo "models/visitor_model_${location_id}.joblib"
+              done < "$RUNNER_TEMP/nightly-retrained-locations.txt"
+            } | sort -u
+          )
+
+          if [ "${#MODEL_PATHS[@]}" -eq 0 ]; then
+            echo "No trained or changed model files to validate."
             exit 0
           fi
 
-          python - <<'PY'
-          from pathlib import Path
+          python - "${MODEL_PATHS[@]}" <<'PY'
+          import sys
           from src.predictor import VisitorPredictor
 
-          for model_path in sorted(Path("models").glob("visitor_model_*.joblib")):
-              VisitorPredictor(str(model_path))
+          for model_path in sys.argv[1:]:
+              VisitorPredictor(model_path)
               print(f"Validated {model_path}")
           PY
 
       - name: Commit updated models and artifacts
         run: |
-          shopt -s nullglob
-          for model_path in models/visitor_model_*.joblib; do
-            location_id="${model_path#models/visitor_model_}"
-            location_id="${location_id%.joblib}"
-            git add -f -- "$model_path"
-            if [ -d "artifacts/$location_id" ]; then
-              git add -f -- "artifacts/$location_id/"
-            fi
-          done
-
           if git diff --cached --quiet -- models artifacts; then
             echo "No model or artifact changes to commit."
-            exit 0
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "chore: update nightly trained models"
+            git push origin main
           fi
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "chore: update nightly trained models"
-          git push origin main
+      - name: Mark retrained locations published
+        run: |
+          python scripts/mark_retrain_published.py \
+            --locations-file "$RUNNER_TEMP/nightly-retrained-locations.txt"

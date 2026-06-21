@@ -17,7 +17,14 @@ from src.auth import (
     validate_password,
     validate_user_record,
 )
-from src.config import DATE_COL, ESTIMATED_WASTE_REDUCTION_RATE, TARGET_COL, artifact_dir_for_location, model_file_for_location
+from src.config import (
+    DATE_COL,
+    ESTIMATED_WASTE_REDUCTION_RATE,
+    TARGET_COL,
+    ForecastTargetDateError,
+    artifact_dir_for_location,
+    model_file_for_location,
+)
 from src.data_admin import attendance_store_mode, delete_record, load_clean_data, save_clean_data, upsert_record
 from src.location_config import save_locations, list_locations
 from src.model_training_runs import (
@@ -34,7 +41,7 @@ from src.prediction_logs import (
     summarize_monitoring,
     update_prediction_logs_with_actual,
 )
-from src.predictor import VisitorPredictor
+from src.predictor import VisitorPredictor, WeatherForecastUnavailableError
 
 ROOT = Path(__file__).resolve().parent
 
@@ -165,6 +172,10 @@ def render_prediction():
                 save_prediction_log(location_id, pred, created_by=user["username"], source_app="admin")
             except Exception:
                 st.warning("Prediction was generated, but monitoring log could not be saved.")
+        except ForecastTargetDateError:
+            st.error("Forecasts are only available within 16 days because weather forecasts are not reliable beyond that range.")
+        except WeatherForecastUnavailableError:
+            st.error("Weather forecast data is unavailable for this date. Please choose a date within the forecast window.")
         except Exception as e:
             st.error(f"Prediction failed: {e}")
 

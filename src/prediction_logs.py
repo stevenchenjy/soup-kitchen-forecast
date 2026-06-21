@@ -20,8 +20,9 @@ from src.config import (
     KG_CO2E_PER_KG_FOOD_WASTE,
     MEAL_WEIGHT_KG,
     location_db_file,
+    validate_forecast_target_date,
 )
-from src.location_config import list_locations
+from src.location_config import get_location, list_locations
 
 
 PREDICTION_LOGS_TABLE_DEFAULT = "prediction_logs"
@@ -253,6 +254,8 @@ def save_prediction_log(
     source_app: str | None = None,
     baseline_meals_prepared: int | None = None,
 ) -> int | str | None:
+    location = get_location(location_id)
+    validate_forecast_target_date(prediction_output.service_date, timezone=location.timezone)
     row = _row_from_prediction(location_id, prediction_output, created_by, source_app, baseline_meals_prepared)
     if _supabase_config():
         existing_rows = _supabase_request(

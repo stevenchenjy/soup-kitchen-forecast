@@ -3,6 +3,7 @@ import streamlit as st
 from src.auth import authenticate_user, get_authorized_locations, get_user, require_role
 from src.config import (
     ESTIMATED_WASTE_REDUCTION_RATE,
+    ForecastTargetDateError,
     KG_CO2E_PER_KG_FOOD_WASTE,
     MEAL_WEIGHT_KG,
     TARGET_COL,
@@ -16,7 +17,7 @@ from src.data_admin import (
 )
 from src.location_config import list_locations
 from src.prediction_logs import save_prediction_log, update_prediction_logs_with_actual
-from src.predictor import VisitorPredictor
+from src.predictor import VisitorPredictor, WeatherForecastUnavailableError
 
 st.set_page_config(page_title="Staff Meal Prep Assistant", layout="centered")
 
@@ -124,24 +125,32 @@ else:
     )
     custom_date = st.text_input("Target service date (Saturday/Sunday, YYYY-MM-DD)", value="")
     if st.button("Get meal recommendation", type="primary"):
-        pred = predictor.predict_next(target_date=custom_date or None, meal_buffer_pct=buf / 100.0)
-        st.success(f"Recommendation ready for {pred.service_date:%Y-%m-%d}.")
-        estimated_food_saved = pred.suggested_meals * ESTIMATED_WASTE_REDUCTION_RATE
-        estimated_carbon_reduced = estimated_food_saved * MEAL_WEIGHT_KG * KG_CO2E_PER_KG_FOOD_WASTE
-        c1, c2 = st.columns(2)
-        c1.metric("Recommended Meals", f"{pred.suggested_meals}")
-        c2.metric("Expected Visitors", f"{pred.predicted_visitors:.1f}")
-        c3, c4 = st.columns(2)
-        c3.metric("Estimated Food Saved", f"{estimated_food_saved:.1f} meals of food")
-        c4.metric("Estimated Carbon Reduced", f"{estimated_carbon_reduced:.1f} kg CO2e")
-        st.caption(
-            f"These are planning estimates based on a {ESTIMATED_WASTE_REDUCTION_RATE:.0%} "
-            "waste-reduction assumption."
-        )
         try:
-            save_prediction_log(location_id, pred, created_by=user["username"], source_app="staff")
-        except Exception:
-            st.warning("Prediction was generated, but monitoring log could not be saved.")
+            pred = predictor.predict_next(target_date=custom_date or None, meal_buffer_pct=buf / 100.0)
+        except ForecastTargetDateError:
+            st.error("Forecasts are only available within 16 days because weather forecasts are not reliable beyond that range.")
+        except WeatherForecastUnavailableError:
+            st.error("Weather forecast data is unavailable for this date. Please choose a date within the forecast window.")
+        except Exception as exc:
+            st.error(f"Prediction failed: {exc}")
+        else:
+            st.success(f"Recommendation ready for {pred.service_date:%Y-%m-%d}.")
+            estimated_food_saved = pred.suggested_meals * ESTIMATED_WASTE_REDUCTION_RATE
+            estimated_carbon_reduced = estimated_food_saved * MEAL_WEIGHT_KG * KG_CO2E_PER_KG_FOOD_WASTE
+            c1, c2 = st.columns(2)
+            c1.metric("Recommended Meals", f"{pred.suggested_meals}")
+            c2.metric("Expected Visitors", f"{pred.predicted_visitors:.1f}")
+            c3, c4 = st.columns(2)
+            c3.metric("Estimated Food Saved", f"{estimated_food_saved:.1f} meals of food")
+            c4.metric("Estimated Carbon Reduced", f"{estimated_carbon_reduced:.1f} kg CO2e")
+            st.caption(
+                f"These are planning estimates based on a {ESTIMATED_WASTE_REDUCTION_RATE:.0%} "
+                "waste-reduction assumption."
+            )
+            try:
+                save_prediction_log(location_id, pred, created_by=user["username"], source_app="staff")
+            except Exception:
+                st.warning("Prediction was generated, but monitoring log could not be saved.")
 
 st.subheader("After Service")
 add_date = st.date_input("Service date", value=None, key="staff_add_date")

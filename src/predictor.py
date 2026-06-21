@@ -6,7 +6,7 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from src.config import DATE_COL
+from src.config import DATE_COL, validate_forecast_target_date
 from src.data_processing import infer_next_service_date
 from src.features import add_basic_calendar_features, add_lag_features, merge_weather_features
 from src.weather import WeatherClient
@@ -21,6 +21,10 @@ class PredictionOutput:
     suggested_meals: int
     meal_buffer_pct: float
     model_segment: str
+
+
+class WeatherForecastUnavailableError(RuntimeError):
+    """Raised when live forecast weather is unavailable for the requested service date."""
 
 
 class VisitorPredictor:
@@ -56,31 +60,48 @@ class VisitorPredictor:
 
         one = tmp.iloc[[-1]].copy()
 
-        need_weather = any(c in self.feature_cols for c in ["temp_10_13", "apparent_temp_10_13", "humidity_10_13", "wind_10_13", "precip_10_13"])
-        if need_weather:
-            client = WeatherClient(
-                zip_code=self.weather_zip_code,
-                country=self.weather_country_code,
-                timezone=self.weather_timezone,
+        client = WeatherClient(
+            zip_code=self.weather_zip_code,
+            country=self.weather_country_code,
+            timezone=self.weather_timezone,
+        )
+        try:
+            weather = client.fetch_forecast_daily(target_date.date())
+        except Exception as exc:
+            raise WeatherForecastUnavailableError(
+                f"Weather forecast data is unavailable for {target_date:%Y-%m-%d}."
+            ) from exc
+        if weather.empty or "date" not in weather.columns:
+            raise WeatherForecastUnavailableError(
+                f"Weather forecast data is unavailable for {target_date:%Y-%m-%d}."
             )
-            try:
-                weather = client.fetch_forecast_daily(target_date.date())
-            except Exception:
-                weather = pd.DataFrame()
-            if weather.empty:
-                weather = pd.DataFrame(
-                    [
-                        {
-                            "date": target_date.date(),
-                            "temp_10_13": history.get("temp_10_13", pd.Series([0])).median() if "temp_10_13" in history.columns else 0,
-                            "apparent_temp_10_13": history.get("apparent_temp_10_13", pd.Series([0])).median() if "apparent_temp_10_13" in history.columns else 0,
-                            "humidity_10_13": history.get("humidity_10_13", pd.Series([0])).median() if "humidity_10_13" in history.columns else 0,
-                            "wind_10_13": history.get("wind_10_13", pd.Series([0])).median() if "wind_10_13" in history.columns else 0,
-                            "precip_10_13": 0,
-                        }
-                    ]
-                )
-            one = merge_weather_features(one, weather)
+
+        weather_dates = pd.to_datetime(weather["date"], errors="coerce").dt.date
+        target_weather = weather.loc[weather_dates == target_date.date()].copy()
+        if target_weather.empty:
+            raise WeatherForecastUnavailableError(
+                f"Weather forecast data is unavailable for {target_date:%Y-%m-%d}."
+            )
+
+        weather_feature_cols = [
+            "temp_10_13",
+            "apparent_temp_10_13",
+            "humidity_10_13",
+            "wind_10_13",
+            "precip_10_13",
+        ]
+        if any(column not in target_weather.columns for column in weather_feature_cols):
+            raise WeatherForecastUnavailableError(
+                f"Weather forecast data is unavailable for {target_date:%Y-%m-%d}."
+            )
+        if target_weather[weather_feature_cols].isna().any(axis=None):
+            raise WeatherForecastUnavailableError(
+                f"Weather forecast data is unavailable for {target_date:%Y-%m-%d}."
+            )
+
+        need_weather = any(c in self.feature_cols for c in weather_feature_cols)
+        if need_weather:
+            one = merge_weather_features(one, target_weather)
 
         one = one.replace([np.inf, -np.inf], np.nan)
         for c in self.feature_cols:
@@ -92,10 +113,11 @@ class VisitorPredictor:
 
     def predict_next(self, target_date: str | None = None, meal_buffer_pct: float | None = None) -> PredictionOutput:
         if target_date:
-            dt = pd.to_datetime(target_date)
+            requested_date = target_date
         else:
-            dt = infer_next_service_date(self.history_df[DATE_COL])
+            requested_date = infer_next_service_date(self.history_df[DATE_COL])
 
+        dt = pd.Timestamp(validate_forecast_target_date(requested_date, timezone=self.weather_timezone))
         segment = self._segment_for_date(dt)
         if segment not in self.models:
             raise ValueError(f"No trained model for segment: {segment}")

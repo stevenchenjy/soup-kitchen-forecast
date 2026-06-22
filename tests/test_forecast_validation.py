@@ -7,7 +7,13 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 
-from src.config import ForecastTargetDateError, validate_forecast_target_date
+from src.config import (
+    ForecastHorizonError,
+    ForecastTargetDateError,
+    ServiceDateParseError,
+    parse_service_date,
+    validate_forecast_target_date,
+)
 from src.prediction_logs import save_prediction_log
 from src.predictor import PredictionOutput, VisitorPredictor, WeatherForecastUnavailableError
 
@@ -60,6 +66,17 @@ class ForecastValidationTests(unittest.TestCase):
             }
         )
 
+    def test_year_first_date_variants_are_normalized(self) -> None:
+        for value in ["2026-07-4", "2026-7-4", "2026/7/4", "2026/07/04"]:
+            with self.subTest(value=value):
+                self.assertEqual(parse_service_date(value).isoformat(), "2026-07-04")
+
+    def test_ambiguous_date_formats_are_rejected(self) -> None:
+        for value in ["07-04-2026", "7/4/26", "04/07/2026"]:
+            with self.subTest(value=value):
+                with self.assertRaises(ServiceDateParseError):
+                    parse_service_date(value)
+
     def test_saturday_and_sunday_within_window_succeed(self) -> None:
         predictor = self._predictor()
         for target_date in [self.today + timedelta(days=1), self.today + timedelta(days=2)]:
@@ -69,6 +86,18 @@ class ForecastValidationTests(unittest.TestCase):
             ):
                 prediction = predictor.predict_next(target_date.isoformat())
                 self.assertEqual(prediction.service_date.date(), target_date)
+
+    def test_non_padded_date_is_normalized_before_weather(self) -> None:
+        predictor = self._predictor()
+        target_date = date(2026, 7, 4)
+        with patch(
+            "src.predictor.WeatherClient.fetch_forecast_daily",
+            return_value=self._weather_for(target_date),
+        ) as fetch_weather:
+            prediction = predictor.predict_next("2026-07-4")
+
+        self.assertEqual(prediction.service_date.date(), target_date)
+        fetch_weather.assert_called_once_with(target_date)
 
     def test_weekday_is_rejected(self) -> None:
         with self.assertRaises(ForecastTargetDateError):
@@ -103,6 +132,20 @@ class ForecastValidationTests(unittest.TestCase):
             with self.assertRaises(WeatherForecastUnavailableError):
                 predictor.predict_next((self.today + timedelta(days=1)).isoformat())
 
+    def test_invalid_date_does_not_call_weather(self) -> None:
+        predictor = self._predictor()
+        with patch("src.predictor.WeatherClient.fetch_forecast_daily") as fetch_weather:
+            with self.assertRaises(ServiceDateParseError):
+                predictor.predict_next("07-04-2026")
+        fetch_weather.assert_not_called()
+
+    def test_far_future_date_raises_horizon_error_before_weather(self) -> None:
+        predictor = self._predictor()
+        with patch("src.predictor.WeatherClient.fetch_forecast_daily") as fetch_weather:
+            with self.assertRaises(ForecastHorizonError):
+                predictor.predict_next((self.today + timedelta(days=16)).isoformat())
+        fetch_weather.assert_not_called()
+
     def test_weather_for_another_date_is_rejected(self) -> None:
         predictor = self._predictor()
         target_date = self.today + timedelta(days=1)
@@ -125,6 +168,21 @@ class ForecastValidationTests(unittest.TestCase):
         )
         with patch("src.prediction_logs._connect") as connect:
             with self.assertRaises(ForecastTargetDateError):
+                save_prediction_log("ny_12550", prediction)
+        connect.assert_not_called()
+
+    def test_invalid_format_is_not_saved_to_prediction_logs(self) -> None:
+        prediction = PredictionOutput(
+            service_date="07-04-2026",  # type: ignore[arg-type]
+            predicted_visitors=100,
+            predicted_quantile=110,
+            residual_buffer=5,
+            suggested_meals=115,
+            meal_buffer_pct=0.08,
+            model_segment="sat",
+        )
+        with patch("src.prediction_logs._connect") as connect:
+            with self.assertRaises(ServiceDateParseError):
                 save_prediction_log("ny_12550", prediction)
         connect.assert_not_called()
 

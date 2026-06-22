@@ -1,5 +1,6 @@
 from datetime import date, datetime, timedelta
 from pathlib import Path
+import re
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -29,39 +30,66 @@ KG_CO2E_PER_KG_FOOD_WASTE = 3.8
 
 
 class ForecastTargetDateError(ValueError):
-    """Raised when a live forecast date is outside the supported service window."""
+    """Base class for invalid live forecast service dates."""
+
+
+class ServiceDateParseError(ForecastTargetDateError):
+    """Raised when a service date is not an accepted year-first date."""
+
+
+class ServiceDateWeekdayError(ForecastTargetDateError):
+    """Raised when a service date is not Saturday or Sunday."""
+
+
+class ServiceDatePastError(ForecastTargetDateError):
+    """Raised when a service date is before today."""
+
+
+class ForecastHorizonError(ForecastTargetDateError):
+    """Raised when a service date is beyond the supported forecast horizon."""
+
+
+SERVICE_DATE_FORMAT_MESSAGE = "Please enter the service date in YYYY-MM-DD format, for example 2026-07-04."
+_SERVICE_DATE_PATTERN = re.compile(r"^(\d{4})([-/])(\d{1,2})\2(\d{1,2})$")
 
 
 def forecast_today(timezone: str = TIMEZONE) -> date:
     return datetime.now(ZoneInfo(timezone)).date()
 
 
-def validate_forecast_target_date(target_date: Any, timezone: str = TIMEZONE) -> date:
+def parse_service_date(value: Any, timezone: str = TIMEZONE) -> date:
     try:
-        if isinstance(target_date, datetime):
-            localized_target = target_date.astimezone(ZoneInfo(timezone)) if target_date.tzinfo else target_date
-            service_date = localized_target.date()
-        elif isinstance(target_date, date):
-            service_date = target_date
-        elif hasattr(target_date, "date"):
-            service_date = target_date.date()
-        else:
-            service_date = date.fromisoformat(str(target_date)[:10])
-    except (TypeError, ValueError) as exc:
-        raise ForecastTargetDateError("target_date must be a valid ISO date") from exc
+        if isinstance(value, datetime):
+            localized_value = value.astimezone(ZoneInfo(timezone)) if value.tzinfo else value
+            service_date = localized_value.date()
+            if not isinstance(service_date, date):
+                raise ServiceDateParseError(SERVICE_DATE_FORMAT_MESSAGE)
+            return service_date
+        if isinstance(value, date):
+            return value
 
-    if not isinstance(service_date, date):
-        raise ForecastTargetDateError("target_date must be a valid ISO date")
+        match = _SERVICE_DATE_PATTERN.fullmatch(str(value).strip())
+        if match is None:
+            raise ServiceDateParseError(SERVICE_DATE_FORMAT_MESSAGE)
+        return date(int(match.group(1)), int(match.group(3)), int(match.group(4)))
+    except ServiceDateParseError:
+        raise
+    except (TypeError, ValueError) as exc:
+        raise ServiceDateParseError(SERVICE_DATE_FORMAT_MESSAGE) from exc
+
+
+def validate_forecast_target_date(target_date: Any, timezone: str = TIMEZONE) -> date:
+    service_date = parse_service_date(target_date, timezone=timezone)
     if service_date.weekday() not in {5, 6}:
-        raise ForecastTargetDateError("target_date must be Saturday or Sunday")
+        raise ServiceDateWeekdayError("Service date must be Saturday or Sunday.")
 
     today = forecast_today(timezone)
     last_forecast_date = today + timedelta(days=FORECAST_MAX_DAYS_AHEAD - 1)
     if service_date < today:
-        raise ForecastTargetDateError("target_date cannot be in the past")
+        raise ServiceDatePastError("Service date cannot be in the past.")
     if service_date > last_forecast_date:
-        raise ForecastTargetDateError(
-            f"target_date must be within {FORECAST_MAX_DAYS_AHEAD} days, through {last_forecast_date.isoformat()}"
+        raise ForecastHorizonError(
+            "Forecasts are only available within 16 days because weather forecasts are not reliable beyond that range."
         )
     return service_date
 

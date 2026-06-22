@@ -13,6 +13,7 @@ from src.config import (
     WEATHER_OBS_END_HOUR,
     WEATHER_OBS_START_HOUR,
     ZIP_CODE,
+    parse_service_date,
 )
 
 
@@ -87,6 +88,7 @@ class WeatherClient:
         return self._aggregate_10_to_13(hourly)
 
     def fetch_forecast_daily(self, target_date: str | date) -> pd.DataFrame:
+        service_date = parse_service_date(target_date, timezone=self.timezone)
         loc = self._geocode()
         url = "https://api.open-meteo.com/v1/forecast"
         params = {
@@ -94,8 +96,8 @@ class WeatherClient:
             "longitude": loc.longitude,
             "hourly": "temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,precipitation",
             "timezone": self.timezone,
-            "start_date": str(target_date),
-            "end_date": str(target_date),
+            "start_date": service_date.isoformat(),
+            "end_date": service_date.isoformat(),
         }
         r = requests.get(url, params=params, timeout=30)
         r.raise_for_status()

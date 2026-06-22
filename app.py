@@ -21,9 +21,12 @@ from src.config import (
     DATE_COL,
     ESTIMATED_WASTE_REDUCTION_RATE,
     TARGET_COL,
+    ForecastHorizonError,
     ForecastTargetDateError,
+    ServiceDateParseError,
     artifact_dir_for_location,
     model_file_for_location,
+    parse_service_date,
 )
 from src.data_admin import attendance_store_mode, delete_record, load_clean_data, save_clean_data, upsert_record
 from src.location_config import save_locations, list_locations
@@ -161,7 +164,10 @@ def render_prediction():
 
     if st.button("Generate prediction", type="primary"):
         try:
-            pred = predictor.predict_next(target_date=custom_date or None, meal_buffer_pct=buffer_pct / 100.0)
+            normalized_date = parse_service_date(custom_date) if custom_date else None
+            if normalized_date is not None and normalized_date.isoformat() != custom_date.strip():
+                st.info(f"Using service date: {normalized_date.isoformat()}")
+            pred = predictor.predict_next(target_date=normalized_date, meal_buffer_pct=buffer_pct / 100.0)
             st.success(
                 f"Location: {location_id} | Service Date: {pred.service_date:%Y-%m-%d} | "
                 f"Segment: {pred.model_segment.upper()} | Point: {pred.predicted_visitors:.1f} | "
@@ -172,10 +178,14 @@ def render_prediction():
                 save_prediction_log(location_id, pred, created_by=user["username"], source_app="admin")
             except Exception:
                 st.warning("Prediction was generated, but monitoring log could not be saved.")
-        except ForecastTargetDateError:
+        except ServiceDateParseError:
+            st.error("Please enter the service date in YYYY-MM-DD format, for example 2026-07-04.")
+        except ForecastHorizonError:
             st.error("Forecasts are only available within 16 days because weather forecasts are not reliable beyond that range.")
+        except ForecastTargetDateError as exc:
+            st.error(str(exc))
         except WeatherForecastUnavailableError:
-            st.error("Weather forecast data is unavailable for this date. Please choose a date within the forecast window.")
+            st.error("Weather forecast data is unavailable for this date. Please try again later or choose another date within the forecast window.")
         except Exception as e:
             st.error(f"Prediction failed: {e}")
 

@@ -5,11 +5,14 @@ import streamlit as st
 from src.auth import authenticate_user, get_authorized_locations, get_user, require_role
 from src.config import (
     ESTIMATED_WASTE_REDUCTION_RATE,
+    ForecastHorizonError,
     ForecastTargetDateError,
     KG_CO2E_PER_KG_FOOD_WASTE,
     MEAL_WEIGHT_KG,
+    ServiceDateParseError,
     TARGET_COL,
     model_file_for_location,
+    parse_service_date,
 )
 from src.data_admin import (
     delete_latest_staff_created_attendance,
@@ -131,11 +134,18 @@ else:
     custom_date = st.text_input("Target service date (Saturday/Sunday, YYYY-MM-DD)", value="")
     if st.button("Get meal recommendation", type="primary"):
         try:
-            pred = predictor.predict_next(target_date=custom_date or None, meal_buffer_pct=buf / 100.0)
-        except ForecastTargetDateError:
+            normalized_date = parse_service_date(custom_date) if custom_date else None
+            if normalized_date is not None and normalized_date.isoformat() != custom_date.strip():
+                st.info(f"Using service date: {normalized_date.isoformat()}")
+            pred = predictor.predict_next(target_date=normalized_date, meal_buffer_pct=buf / 100.0)
+        except ServiceDateParseError:
+            st.error("Please enter the service date in YYYY-MM-DD format, for example 2026-07-04.")
+        except ForecastHorizonError:
             st.error("Forecasts are only available within 16 days because weather forecasts are not reliable beyond that range.")
+        except ForecastTargetDateError as exc:
+            st.error(str(exc))
         except WeatherForecastUnavailableError:
-            st.error("Weather forecast data is unavailable for this date. Please choose a date within the forecast window.")
+            st.error("Weather forecast data is unavailable for this date. Please try again later or choose another date within the forecast window.")
         except Exception as exc:
             st.error(f"Prediction failed: {exc}")
         else:

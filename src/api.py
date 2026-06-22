@@ -3,7 +3,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from src.config import ForecastTargetDateError, model_file_for_location
+from src.config import ForecastTargetDateError, model_file_for_location, parse_service_date
 from src.predictor import VisitorPredictor, WeatherForecastUnavailableError
 
 app = FastAPI(title="Visitor Forecast API", version="2.0.0")
@@ -35,9 +35,10 @@ def health():
 
 @app.post("/predict-next")
 def predict_next(req: PredictRequest):
-    predictor = _get_predictor(req.location_id)
     try:
-        pred = predictor.predict_next(target_date=req.target_date, meal_buffer_pct=req.meal_buffer_pct)
+        normalized_date = parse_service_date(req.target_date) if req.target_date else None
+        predictor = _get_predictor(req.location_id)
+        pred = predictor.predict_next(target_date=normalized_date, meal_buffer_pct=req.meal_buffer_pct)
     except ForecastTargetDateError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except WeatherForecastUnavailableError as exc:

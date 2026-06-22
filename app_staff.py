@@ -1,3 +1,5 @@
+from urllib.error import HTTPError, URLError
+
 import streamlit as st
 
 from src.auth import authenticate_user, get_authorized_locations, get_user, require_role
@@ -13,6 +15,7 @@ from src.data_admin import (
     delete_latest_staff_created_attendance,
     latest_staff_created_attendance,
     load_clean_data,
+    load_recent_attendance,
     upsert_record,
 )
 from src.location_config import list_locations
@@ -20,6 +23,9 @@ from src.prediction_logs import save_prediction_log, update_prediction_logs_with
 from src.predictor import VisitorPredictor, WeatherForecastUnavailableError
 
 st.set_page_config(page_title="Staff Meal Prep Assistant", layout="centered")
+
+ATTENDANCE_UNAVAILABLE_MESSAGE = "Attendance data is temporarily unavailable. Please refresh in a moment."
+ATTENDANCE_SAVE_ERROR_MESSAGE = "Could not save attendance right now. Please try again."
 
 
 
@@ -96,7 +102,6 @@ if sidebar.button("Logout"):
     st.rerun()
 
 model_path = model_file_for_location(location_id)
-df = load_clean_data(location_id)
 predictor = None
 model_load_error = None
 if model_path.exists():
@@ -157,40 +162,71 @@ add_date = st.date_input("Service date", value=None, key="staff_add_date")
 add_visitors = st.number_input("Actual visitors served", min_value=0, max_value=10000, value=120, step=1)
 if st.button("Add / Update"):
     if add_date is not None:
-        upsert_record(str(add_date), int(add_visitors), location_id, changed_by=user["username"])
-        monitoring_updated = True
         try:
-            update_prediction_logs_with_actual(location_id, str(add_date), int(add_visitors))
+            upsert_record(
+                str(add_date),
+                int(add_visitors),
+                location_id,
+                changed_by=user["username"],
+                load_result=False,
+            )
+        except (TimeoutError, URLError, HTTPError):
+            st.error(ATTENDANCE_SAVE_ERROR_MESSAGE)
         except Exception:
-            monitoring_updated = False
-            st.warning("Attendance was saved, but monitoring log could not be updated.")
-        st.success("Saved.")
-        if monitoring_updated:
-            st.rerun()
+            st.error(ATTENDANCE_SAVE_ERROR_MESSAGE)
+        else:
+            try:
+                update_prediction_logs_with_actual(location_id, str(add_date), int(add_visitors))
+            except Exception:
+                st.warning("Attendance was saved, but monitoring log could not be updated.")
+            st.session_state.pop(f"staff_full_history_{location_id}", None)
+            st.success("Saved.")
 
-if not df.empty:
+try:
+    recent_attendance = load_recent_attendance(location_id, limit=5)
+except (TimeoutError, URLError, HTTPError):
+    recent_attendance = None
+    st.warning(ATTENDANCE_UNAVAILABLE_MESSAGE)
+except Exception:
+    recent_attendance = None
+    st.warning(ATTENDANCE_UNAVAILABLE_MESSAGE)
+
+if recent_attendance is not None and not recent_attendance.empty:
     st.markdown("**Recent visitor counts**")
-    recent_df = df[["service_date", TARGET_COL]].sort_values("service_date", ascending=False).head(5).copy()
+    recent_df = recent_attendance[["service_date", TARGET_COL]].copy()
     recent_df["service_date"] = recent_df["service_date"].dt.strftime("%Y-%m-%d")
     recent_df = recent_df.rename(columns={"service_date": "Service date", TARGET_COL: "Actual visitors served"})
     st.dataframe(recent_df, use_container_width=True, hide_index=True, height=300)
 
-    with st.expander("View full attendance history", expanded=False):
+with st.expander("View full attendance history", expanded=False):
+    history_key = f"staff_full_history_{location_id}"
+    if st.button("Load full attendance history", key=f"load_{history_key}"):
+        try:
+            st.session_state[history_key] = load_clean_data(location_id)
+        except (TimeoutError, URLError, HTTPError):
+            st.session_state.pop(history_key, None)
+            st.warning(ATTENDANCE_UNAVAILABLE_MESSAGE)
+        except Exception:
+            st.session_state.pop(history_key, None)
+            st.warning(ATTENDANCE_UNAVAILABLE_MESSAGE)
+
+    full_attendance = st.session_state.get(history_key)
+    if full_attendance is not None and not full_attendance.empty:
         filter_start, filter_end = st.columns(2)
         with filter_start:
             history_start = st.date_input(
                 "Start date",
-                value=df["service_date"].min().date(),
+                value=full_attendance["service_date"].min().date(),
                 key="staff_history_start",
             )
         with filter_end:
             history_end = st.date_input(
                 "End date",
-                value=df["service_date"].max().date(),
+                value=full_attendance["service_date"].max().date(),
                 key="staff_history_end",
             )
 
-        history_df = df[["service_date", TARGET_COL]].copy()
+        history_df = full_attendance[["service_date", TARGET_COL]].copy()
         if history_start > history_end:
             st.warning("Start date must be on or before end date.")
             history_df = history_df.iloc[0:0]
@@ -206,11 +242,25 @@ if not df.empty:
             columns={"service_date": "Service date", TARGET_COL: "Actual visitors served"}
         )
         st.dataframe(history_df, use_container_width=True, hide_index=True)
+    elif full_attendance is not None:
+        st.caption("No attendance history is available for this location.")
 
 
 st.markdown("**Delete My Latest Attendance Entry**")
-latest_entry = latest_staff_created_attendance(location_id, user["username"])
-if latest_entry is None:
+try:
+    latest_entry = latest_staff_created_attendance(location_id, user["username"])
+except (TimeoutError, URLError, HTTPError):
+    latest_entry = None
+    latest_entry_unavailable = True
+except Exception:
+    latest_entry = None
+    latest_entry_unavailable = True
+else:
+    latest_entry_unavailable = False
+
+if latest_entry_unavailable:
+    st.warning(ATTENDANCE_UNAVAILABLE_MESSAGE)
+elif latest_entry is None:
     st.caption("No recent attendance entry found for your account.")
 else:
     st.write("Latest attendance entry you created:")
@@ -227,11 +277,18 @@ else:
         if not confirm_delete:
             st.error("Please confirm before deleting this attendance entry.")
         else:
-            deleted = delete_latest_staff_created_attendance(location_id, user["username"])
-            if deleted is None:
-                st.error("That attendance entry is no longer available to delete.")
+            try:
+                deleted = delete_latest_staff_created_attendance(location_id, user["username"])
+            except (TimeoutError, URLError, HTTPError):
+                st.error(ATTENDANCE_UNAVAILABLE_MESSAGE)
+            except Exception:
+                st.error(ATTENDANCE_UNAVAILABLE_MESSAGE)
             else:
-                st.session_state["staff_delete_message"] = (
-                    f"Deleted your attendance entry for {deleted['service_date']}."
-                )
-                st.rerun()
+                if deleted is None:
+                    st.error("That attendance entry is no longer available to delete.")
+                else:
+                    st.session_state.pop(f"staff_full_history_{location_id}", None)
+                    st.session_state["staff_delete_message"] = (
+                        f"Deleted your attendance entry for {deleted['service_date']}."
+                    )
+                    st.rerun()

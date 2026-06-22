@@ -154,13 +154,14 @@ def _supabase_request(
     payload: Any | None = None,
     extra_headers: dict[str, str] | None = None,
     table: str | None = None,
+    timeout: float = 10,
 ) -> Any:
     url = _supabase_url(table)
     if params:
         url = f"{url}?{urlencode(params)}"
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
     request = Request(url, data=data, headers=_supabase_headers(extra_headers), method=method)
-    with urlopen(request, timeout=10) as response:
+    with urlopen(request, timeout=timeout) as response:
         body = response.read().decode("utf-8")
     return json.loads(body) if body else None
 
@@ -252,6 +253,16 @@ def _load_clean_data_sqlite(location_id: str) -> pd.DataFrame:
     return _format_attendance_df(df)
 
 
+def _load_recent_attendance_sqlite(location_id: str, limit: int) -> pd.DataFrame:
+    with _connect(location_id) as conn:
+        df = pd.read_sql_query(
+            "SELECT service_date, visitors FROM attendance ORDER BY service_date DESC LIMIT ?",
+            conn,
+            params=(limit,),
+        )
+    return _format_attendance_df(df)
+
+
 def _save_clean_data_sqlite(df: pd.DataFrame, location_id: str) -> None:
     out = _normalize_attendance_df(df)
     with _connect(location_id) as conn:
@@ -313,6 +324,23 @@ def _load_clean_data_supabase(location_id: str) -> pd.DataFrame:
             "location_id": f"eq.{location_id}",
             "order": "service_date.asc",
         },
+        timeout=20,
+    )
+    if not isinstance(rows, list):
+        return pd.DataFrame(columns=[DATE_COL, TARGET_COL])
+    return _format_attendance_df(pd.DataFrame(rows))
+
+
+def _load_recent_attendance_supabase(location_id: str, limit: int) -> pd.DataFrame:
+    rows = _supabase_request(
+        "GET",
+        params={
+            "select": "service_date,visitors",
+            "location_id": f"eq.{location_id}",
+            "order": "service_date.desc",
+            "limit": str(limit),
+        },
+        timeout=20,
     )
     if not isinstance(rows, list):
         return pd.DataFrame(columns=[DATE_COL, TARGET_COL])
@@ -377,6 +405,7 @@ def _upsert_record_supabase(
     visitors: int,
     location_id: str,
     changed_by: str | None = None,
+    load_result: bool = True,
 ) -> pd.DataFrame:
     dt = pd.to_datetime(service_date).strftime("%Y-%m-%d")
     now = datetime.now(timezone.utc).isoformat()
@@ -406,9 +435,16 @@ def _upsert_record_supabase(
             _delete_staff_receipt_supabase(receipt_id)
         raise
     if receipt_id is not None:
-        _prune_staff_receipts_supabase(location_id, changed_by, keep_id=receipt_id)
+        try:
+            _prune_staff_receipts_supabase(location_id, changed_by, keep_id=receipt_id)
+        except Exception:
+            # Attendance is already saved. Receipt cleanup can be retried during
+            # a later staff write/delete and must not turn a successful save into an error.
+            pass
     _mark_location_dirty(location_id, now)
-    return load_clean_data(location_id)
+    if load_result:
+        return load_clean_data(location_id)
+    return _format_attendance_df(pd.DataFrame([{DATE_COL: dt, TARGET_COL: int(visitors)}]))
 
 
 def _delete_record_supabase(
@@ -450,6 +486,15 @@ def load_clean_data(location_id: str) -> pd.DataFrame:
     return _load_clean_data_sqlite(location_id)
 
 
+def load_recent_attendance(location_id: str, limit: int = 5) -> pd.DataFrame:
+    row_limit = int(limit)
+    if row_limit <= 0:
+        return pd.DataFrame(columns=[DATE_COL, TARGET_COL])
+    if _supabase_config():
+        return _load_recent_attendance_supabase(location_id, row_limit)
+    return _load_recent_attendance_sqlite(location_id, row_limit)
+
+
 
 def save_clean_data(df: pd.DataFrame, location_id: str) -> None:
     if _supabase_config():
@@ -464,9 +509,10 @@ def upsert_record(
     visitors: int,
     location_id: str,
     changed_by: str | None = None,
+    load_result: bool = True,
 ) -> pd.DataFrame:
     if _supabase_config():
-        return _upsert_record_supabase(service_date, visitors, location_id, changed_by)
+        return _upsert_record_supabase(service_date, visitors, location_id, changed_by, load_result)
     return _upsert_record_sqlite(service_date, visitors, location_id, changed_by)
 
 

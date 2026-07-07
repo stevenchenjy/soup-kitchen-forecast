@@ -1,6 +1,8 @@
 import json
 import subprocess
 import sys
+from datetime import datetime
+from html import escape
 from pathlib import Path
 
 import streamlit as st
@@ -49,6 +51,45 @@ from src.predictor import VisitorPredictor, WeatherForecastUnavailableError
 ROOT = Path(__file__).resolve().parent
 
 st.set_page_config(page_title="Multi-Location Forecast Admin", layout="wide")
+
+st.markdown(
+    """
+    <style>
+    .timestamp-metric-value {
+        color: rgb(49, 51, 63);
+        font-size: 2rem;
+        font-weight: 400;
+        line-height: 1.2;
+        overflow-wrap: anywhere;
+        padding-top: 0.25rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+def format_timestamp_for_metric(value: object, empty_label: str = "N/A") -> tuple[str, str | None]:
+    if value is None or value == "":
+        return empty_label, None
+
+    timestamp = str(value)
+    try:
+        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return timestamp, None
+    return parsed.date().isoformat(), timestamp
+
+
+def render_timestamp_metric(column, label: str, value: object, empty_label: str = "N/A") -> None:
+    display_value, detail = format_timestamp_for_metric(value, empty_label)
+    column.markdown(f"**{label}**")
+    column.markdown(
+        f'<div class="timestamp-metric-value">{escape(display_value)}</div>',
+        unsafe_allow_html=True,
+    )
+    if detail:
+        column.caption(detail)
 
 
 
@@ -234,11 +275,20 @@ def render_model_monitoring():
 
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Needs retraining", "Yes" if retrain_state and retrain_state.get("dirty") else "No")
-    c2.metric("Last attendance update", retrain_state.get("last_attendance_updated_at", "N/A") if retrain_state else "N/A")
-    c3.metric(
-        "Last successful training",
+    render_timestamp_metric(
+        c2,
+        "Last attendance update",
+        retrain_state.get("last_attendance_updated_at") if retrain_state else None,
+    )
+    last_successful_training = (
         retrain_state.get("last_successful_training_at") if retrain_state and retrain_state.get("last_successful_training_at")
-        else latest_success.get("finished_at", "Never") if latest_success else "Never",
+        else latest_success.get("finished_at") if latest_success else None
+    )
+    render_timestamp_metric(
+        c3,
+        "Last successful training",
+        last_successful_training,
+        empty_label="Never",
     )
     c4.metric("Last status", latest_run.get("status", "No runs") if latest_run else "No runs")
     c5.metric("Attendance rows", latest_run.get("attendance_rows", "N/A") if latest_run else "N/A")
@@ -411,12 +461,12 @@ def render_data_ops():
             latest_success = None
             st.warning(f"Training status could not be loaded: {exc}")
 
-        last_training = latest_success.get("finished_at", "Never") if latest_success else "Never"
+        last_training = latest_success.get("finished_at") if latest_success else None
         raw_status = latest_run.get("status") if latest_run else None
         training_status = raw_status.title() if raw_status else "Never Trained"
         needs_retraining = "Yes" if retrain_state and retrain_state.get("dirty") else "No"
         s1, s2, s3 = st.columns(3)
-        s1.metric("Last Training", last_training)
+        render_timestamp_metric(s1, "Last Training", last_training, empty_label="Never")
         s2.metric("Training Status", training_status)
         s3.metric("Needs Retraining", needs_retraining)
 

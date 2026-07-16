@@ -1,0 +1,156 @@
+{
+  "package_id": "ny_12550_f6_2026-07-12_v1",
+  "package_status": "candidate_not_active",
+  "created_at_utc": "2026-07-16T19:21:43.757711+00:00",
+  "location_id": "ny_12550",
+  "model_package_schema_version": 2,
+  "feature_contract": {
+    "feature_set_id": "F6_COMPACT_SELECTED",
+    "feature_contract_version": "f6_v1",
+    "ordered_feature_list": [
+      "year_num",
+      "month_num",
+      "day_num",
+      "weekday_num",
+      "weekofyear",
+      "is_weekend",
+      "month_sin",
+      "month_cos",
+      "slot_num",
+      "is_sun",
+      "last_observed_daytype_1",
+      "last_observed_daytype_2",
+      "last_observed_daytype_4",
+      "last_observed_daytype_6",
+      "daytype_mean_last_2",
+      "daytype_median_last_4",
+      "daytype_median_last_6",
+      "daytype_std_last_4",
+      "daytype_recent_vs_previous_3",
+      "daytype_mean2_minus_previous2",
+      "daytype_slot_last_observed",
+      "daytype_slot_match_count",
+      "daytype_slot_days_since_latest",
+      "calendar_days_ahead",
+      "service_horizon",
+      "observed_daytype_count",
+      "future_eligible_services_between",
+      "days_since_last_observed_daytype",
+      "missing_last_observed_daytype_1",
+      "missing_last_observed_daytype_2",
+      "missing_last_observed_daytype_4",
+      "missing_last_observed_daytype_6",
+      "daytype_slot_history_missing"
+    ],
+    "feature_order_sha256": "dac868ae1a739cbee55443a953c6ab5c45876e158e40b57300ffe1c9607f7419",
+    "feature_builder_id": "origin_features.build_repaired_features_as_of:v1",
+    "training_window_id": "TW_EXPANDING",
+    "sample_weight_id": "SW_UNIFORM",
+    "weekday_policy": "T1_valid_weekends",
+    "weather_policy": "W0_no_weather",
+    "segmentation": "separate_saturday_sunday",
+    "recommendation_policy_id": "C0_EXISTING_RAW_QUANTILE"
+  },
+  "recommendation_policy_id": "C0_EXISTING_RAW_QUANTILE",
+  "training": {
+    "entrypoint": "scripts/train_f6_candidate.py",
+    "min_train_size_per_segment": 18,
+    "quantile": 0.8,
+    "training_window_id": "TW_EXPANDING",
+    "sample_weight_id": "SW_UNIFORM",
+    "segmentation": "separate_saturday_sunday",
+    "point_model_class": "RandomForestRegressor",
+    "point_model_parameters": {
+      "n_estimators": 400,
+      "max_depth": 8,
+      "min_samples_leaf": 2,
+      "random_state": 42
+    },
+    "quantile_model_class": "HistGradientBoostingRegressor",
+    "quantile_model_parameters": {
+      "loss": "quantile",
+      "quantile": 0.8,
+      "learning_rate": 0.05,
+      "max_depth": 4,
+      "max_iter": 500,
+      "random_state": 42
+    }
+  },
+  "attendance_input": {
+    "path": "data/updated/attendance_rows.csv",
+    "sha256": "7bd8c4bf341b516a3370ffbe37eb517698ea68192656a03473a120cd50d603db",
+    "byte_size": 30620,
+    "encoding": "us-ascii",
+    "delimiter": ",",
+    "quotechar": "\"",
+    "column_names": [
+      "location_id",
+      "service_date",
+      "visitors",
+      "created_at",
+      "updated_at"
+    ],
+    "date_column": "service_date",
+    "visitors_column": "visitors",
+    "additional_columns": [
+      "location_id",
+      "created_at",
+      "updated_at"
+    ],
+    "normalized_columns": [
+      "service_date",
+      "visitors"
+    ],
+    "row_count": 360,
+    "minimum_service_date": "2023-01-01",
+    "maximum_service_date": "2026-07-12",
+    "duplicate_service_date_rows": 0,
+    "duplicate_service_dates": [],
+    "missing_service_dates": 0,
+    "invalid_service_dates": 0,
+    "missing_attendance_values": 0,
+    "invalid_attendance_values": 0,
+    "non_weekend_record_count": 1,
+    "non_weekend_service_dates": [
+      "2026-04-14"
+    ],
+    "training_eligible_weekend_rows": 359,
+    "source_location_ids": [
+      "ny_12550"
+    ]
+  },
+  "tracked_contract": {
+    "path": "config/model_contracts/f6_v1.json",
+    "sha256": "fa63dfe645490071d6712169a0b723d0807c50320fcc072f32b1992fd1cfdfe1"
+  },
+  "metrics": {
+    "overall": {
+      "MAE": 13.62696513246822,
+      "RMSE": 17.738338356170434,
+      "MAPE": 0.1042057294590647,
+      "Bias": 0.2260978101481283,
+      "P90AbsError": 29.47196491019969,
+      "BacktestRows": 322
+    },
+    "sat": {
+      "MAE": 13.622258066963107,
+      "RMSE": 17.356587106039306,
+      "MAPE": 0.11892179348746783,
+      "Bias": 1.3888320884798868,
+      "P90AbsError": 29.821781547619057,
+      "BacktestRows": 163
+    },
+    "sun": {
+      "MAE": 13.631790614715598,
+      "RMSE": 18.121347194077277,
+      "MAPE": 0.0891194499834061,
+      "Bias": -0.9658876449970081,
+      "P90AbsError": 28.586989263718344,
+      "BacktestRows": 159
+    }
+  },
+  "activation": {
+    "active_model_changed": false,
+    "requires_separate_activation_stage": true
+  }
+}

@@ -300,6 +300,14 @@ def test_generic_prediction_keys_are_unique_and_provenance_is_origin_safe(monkey
             assert pd.Timestamp(source_date) <= pd.Timestamp(row.forecast_origin)
 
 
+@pytest.mark.skipif(
+    not (
+        ROOT
+        / "artifacts/ny_12550/model_optimization/phase1_origin_backtest"
+        / "05_origin_aware_predictions.csv"
+    ).is_file(),
+    reason="The F0 reproduction gate requires ignored Phase 1 artifacts",
+)
 def test_phase1_reference_artifact_reproduces_required_f0_gate() -> None:
     predictions = pd.read_csv(
         ROOT / "artifacts/ny_12550/model_optimization/phase1_origin_backtest/05_origin_aware_predictions.csv"

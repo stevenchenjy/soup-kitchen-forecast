@@ -4,6 +4,7 @@ import json
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from scripts.run_phase2c_lite_calibration import (
     ALIGNMENT_KEY,
@@ -24,6 +25,12 @@ from scripts.run_phase2c_lite_calibration import (
 )
 from scripts.run_phase2a5_supabase_reconciliation import sha256_file
 from src.calibration import C0, CALIBRATION_POLICIES, PRIMARY_POLICIES
+
+
+pytestmark = pytest.mark.skipif(
+    not SOURCE_PATH.is_file() or not (OUTPUT_DIR / "phase2c_manifest.json").is_file(),
+    reason="Phase 2C reproduction requires ignored frozen inputs and artifacts",
+)
 
 
 def load_predictions() -> pd.DataFrame:

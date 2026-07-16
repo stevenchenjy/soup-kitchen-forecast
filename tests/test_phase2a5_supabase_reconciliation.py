@@ -31,6 +31,13 @@ from src.origin_features import MODEL_FEATURES, T1_VALID_WEEKENDS, W0_NO_WEATHER
 
 
 ROOT = Path(__file__).resolve().parents[1]
+LOCAL_REPRODUCTION_INPUTS_AVAILABLE = SOURCE_PATH.is_file() and (
+    OUTPUT_DIR / "02_supabase_csv_validation.json"
+).is_file()
+pytestmark = pytest.mark.skipif(
+    not LOCAL_REPRODUCTION_INPUTS_AVAILABLE,
+    reason="Phase 2A.5 reproduction requires the ignored production export and artifacts",
+)
 
 
 def validation_payload() -> dict:

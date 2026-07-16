@@ -19,54 +19,25 @@ from src.origin_features import (
 )
 
 
-LOCKED_F6_FEATURES: tuple[str, ...] = (
-    "year_num",
-    "month_num",
-    "day_num",
-    "weekday_num",
-    "weekofyear",
-    "is_weekend",
-    "month_sin",
-    "month_cos",
-    "slot_num",
-    "is_sun",
-    "last_observed_daytype_1",
-    "last_observed_daytype_2",
-    "last_observed_daytype_4",
-    "last_observed_daytype_6",
-    "daytype_mean_last_2",
-    "daytype_median_last_4",
-    "daytype_median_last_6",
-    "daytype_std_last_4",
-    "daytype_recent_vs_previous_3",
-    "daytype_mean2_minus_previous2",
-    "daytype_slot_last_observed",
-    "daytype_slot_match_count",
-    "daytype_slot_days_since_latest",
-    "calendar_days_ahead",
-    "service_horizon",
-    "observed_daytype_count",
-    "future_eligible_services_between",
-    "days_since_last_observed_daytype",
-    "missing_last_observed_daytype_1",
-    "missing_last_observed_daytype_2",
-    "missing_last_observed_daytype_4",
-    "missing_last_observed_daytype_6",
-    "daytype_slot_history_missing",
-)
+TRACKED_F6_CONTRACT = PROJECT_ROOT / "config/model_contracts/f6_v1.json"
 LOCKED_F6_FEATURE_ORDER_SHA256 = (
     "dac868ae1a739cbee55443a953c6ab5c45876e158e40b57300ffe1c9607f7419"
 )
-LOCKED_FEATURE_ARTIFACT = (
+OPTIONAL_RESEARCH_LOCK_ARTIFACT = (
     PROJECT_ROOT
     / "artifacts/ny_12550/model_optimization/phase2a5_supabase_reconciliation"
     / "07_locked_feature_set.json"
 )
+# Backward-compatible name for optional research diagnostics. Production code does
+# not read this path.
+LOCKED_FEATURE_ARTIFACT = OPTIONAL_RESEARCH_LOCK_ARTIFACT
 MODEL_PACKAGE_SCHEMA_VERSION = 2
 TRAINING_WINDOW_ID = "TW_EXPANDING"
 SAMPLE_WEIGHT_ID = "SW_UNIFORM"
 RECOMMENDATION_POLICY_ID = "C0_EXISTING_RAW_QUANTILE"
 FEATURE_BUILDER_ID = "origin_features.build_repaired_features_as_of:v1"
+FEATURE_CONTRACT_VERSION = "f6_v1"
+SEGMENTATION_ID = "separate_saturday_sunday"
 
 
 @dataclass(frozen=True)
@@ -81,6 +52,65 @@ def feature_order_sha256(feature_cols: list[str] | tuple[str, ...]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def load_tracked_f6_contract(path: str | Path = TRACKED_F6_CONTRACT) -> dict[str, Any]:
+    contract_path = Path(path)
+    try:
+        payload = json.loads(contract_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"Tracked F6 contract is missing: {contract_path}") from exc
+
+    required = {
+        "feature_set_id",
+        "feature_contract_version",
+        "ordered_feature_list",
+        "feature_order_sha256",
+        "feature_builder_id",
+        "training_window_id",
+        "sample_weight_id",
+        "weekday_policy",
+        "weather_policy",
+        "segmentation",
+        "recommendation_policy_id",
+    }
+    missing = required.difference(payload)
+    if missing:
+        raise ValueError(f"Tracked F6 contract is missing fields: {sorted(missing)}")
+
+    expected_values = {
+        "feature_set_id": F6,
+        "feature_contract_version": FEATURE_CONTRACT_VERSION,
+        "feature_order_sha256": LOCKED_F6_FEATURE_ORDER_SHA256,
+        "feature_builder_id": FEATURE_BUILDER_ID,
+        "training_window_id": TRAINING_WINDOW_ID,
+        "sample_weight_id": SAMPLE_WEIGHT_ID,
+        "weekday_policy": T1_VALID_WEEKENDS,
+        "weather_policy": W0_NO_WEATHER,
+        "segmentation": SEGMENTATION_ID,
+        "recommendation_policy_id": RECOMMENDATION_POLICY_ID,
+    }
+    for key, expected in expected_values.items():
+        if payload.get(key) != expected:
+            raise ValueError(f"Tracked F6 contract mismatch for {key}")
+
+    features = payload.get("ordered_feature_list")
+    if not isinstance(features, list) or not features or not all(
+        isinstance(feature, str) and feature for feature in features
+    ):
+        raise ValueError("Tracked F6 ordered_feature_list must be a non-empty string list")
+    if len(features) != 33 or len(set(features)) != 33:
+        raise ValueError("Tracked F6 contract must contain 33 unique ordered features")
+    actual_hash = feature_order_sha256(features)
+    if actual_hash != payload["feature_order_sha256"]:
+        raise ValueError(f"Tracked F6 feature-order hash mismatch: {actual_hash}")
+    return payload
+
+
+_TRACKED_F6_CONTRACT_PAYLOAD = load_tracked_f6_contract()
+LOCKED_F6_FEATURES: tuple[str, ...] = tuple(
+    _TRACKED_F6_CONTRACT_PAYLOAD["ordered_feature_list"]
+)
+
+
 def validate_locked_f6_feature_order(
     feature_cols: list[str] | tuple[str, ...],
 ) -> list[str]:
@@ -93,7 +123,11 @@ def validate_locked_f6_feature_order(
     return ordered
 
 
-def validate_lock_artifact(path: str | Path = LOCKED_FEATURE_ARTIFACT) -> dict[str, Any]:
+def validate_research_lock_artifact(
+    path: str | Path = OPTIONAL_RESEARCH_LOCK_ARTIFACT,
+) -> dict[str, Any]:
+    """Optionally compare a local research lock with the tracked production contract."""
+
     artifact_path = Path(path)
     payload = json.loads(artifact_path.read_text(encoding="utf-8"))
     if payload.get("selected_feature_set_id") != F6:
@@ -104,19 +138,15 @@ def validate_lock_artifact(path: str | Path = LOCKED_FEATURE_ARTIFACT) -> dict[s
     return payload
 
 
+def validate_lock_artifact(path: str | Path = LOCKED_FEATURE_ARTIFACT) -> dict[str, Any]:
+    """Backward-compatible alias for optional research diagnostics."""
+
+    return validate_research_lock_artifact(path)
+
+
 def locked_feature_contract_metadata() -> dict[str, Any]:
     validate_locked_f6_feature_order(LOCKED_F6_FEATURES)
-    return {
-        "feature_set_id": F6,
-        "feature_order_sha256": LOCKED_F6_FEATURE_ORDER_SHA256,
-        "ordered_feature_list": list(LOCKED_F6_FEATURES),
-        "feature_builder_id": FEATURE_BUILDER_ID,
-        "training_window_id": TRAINING_WINDOW_ID,
-        "sample_weight_id": SAMPLE_WEIGHT_ID,
-        "weekday_policy": T1_VALID_WEEKENDS,
-        "weather_policy": W0_NO_WEATHER,
-        "segmentation": "separate_saturday_sunday",
-    }
+    return json.loads(json.dumps(_TRACKED_F6_CONTRACT_PAYLOAD))
 
 
 def validate_package_feature_contract(
@@ -132,12 +162,14 @@ def validate_package_feature_contract(
     if package_contract.get("ordered_feature_list") != expected["ordered_feature_list"]:
         raise ValueError("Model package ordered features differ from locked F6")
     for key in (
+        "feature_contract_version",
         "feature_builder_id",
         "training_window_id",
         "sample_weight_id",
         "weekday_policy",
         "weather_policy",
         "segmentation",
+        "recommendation_policy_id",
     ):
         if package_contract.get(key) != expected[key]:
             raise ValueError(f"Model package feature contract mismatch for {key}")

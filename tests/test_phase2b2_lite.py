@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from scripts.run_phase2b2_lite import (
     ALIGNMENT_KEY,
@@ -24,6 +25,14 @@ from scripts.run_phase2b2_lite import (
 from scripts.run_phase2a5_supabase_reconciliation import history_from_normalized, locked_feature_contract, sha256_file
 from src.modeling import make_point_model
 from src.sample_weights import SAMPLE_WEIGHT_CANDIDATES, generate_sample_weights
+
+
+pytestmark = pytest.mark.skipif(
+    not SOURCE_PATH.is_file()
+    or not SNAPSHOT_PATH.is_file()
+    or not (OUTPUT_DIR / "phase2b2_lite_manifest.json").is_file(),
+    reason="Phase 2B2 reproduction requires ignored frozen inputs and artifacts",
+)
 
 
 def test_model_class_parameters_and_seed_remain_locked() -> None:

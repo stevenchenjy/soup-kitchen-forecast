@@ -24,6 +24,7 @@ from src.data_admin import (
 from src.location_config import list_locations
 from src.prediction_logs import save_prediction_log, update_prediction_logs_with_actual
 from src.predictor import VisitorPredictor, WeatherForecastUnavailableError
+from src.recommendation_ui import recommendation_ui_policy
 
 st.set_page_config(page_title="Staff Meal Prep Assistant", layout="centered")
 
@@ -123,21 +124,30 @@ if predictor is None:
     else:
         st.warning("Forecast is not ready for this location. Please contact an admin.")
 else:
-    buf = st.slider(
-        "Extra meals safety buffer (%)",
-        0,
-        30,
-        8,
-        1,
-        help="This adds a small safety margin so the kitchen prepares a few extra meals in case more visitors arrive than predicted.",
-    )
+    ui_policy = recommendation_ui_policy(predictor)
+    st.caption(ui_policy.package_caption)
+    if ui_policy.show_percentage_buffer:
+        buf = st.slider(
+            "Extra meals safety buffer (%)",
+            0,
+            30,
+            8,
+            1,
+            help="This adds a small safety margin so the kitchen prepares a few extra meals in case more visitors arrive than predicted.",
+        )
+    else:
+        buf = None
+        st.caption("F6/C0 uses the raw 80th-percentile recommendation without a percentage buffer.")
     custom_date = st.text_input("Target service date (Saturday/Sunday, YYYY-MM-DD)", value="")
     if st.button("Get meal recommendation", type="primary"):
         try:
             normalized_date = parse_service_date(custom_date) if custom_date else None
             if normalized_date is not None and normalized_date.isoformat() != custom_date.strip():
                 st.info(f"Using service date: {normalized_date.isoformat()}")
-            pred = predictor.predict_next(target_date=normalized_date, meal_buffer_pct=buf / 100.0)
+            meal_buffer_pct = buf / 100.0 if buf is not None else None
+            pred = predictor.predict_next(
+                target_date=normalized_date, meal_buffer_pct=meal_buffer_pct
+            )
         except ServiceDateParseError:
             st.error("Please enter the service date in YYYY-MM-DD format, for example 2026-07-04.")
         except ForecastHorizonError:
@@ -153,7 +163,7 @@ else:
             estimated_food_saved = pred.suggested_meals * ESTIMATED_WASTE_REDUCTION_RATE
             estimated_carbon_reduced = estimated_food_saved * MEAL_WEIGHT_KG * KG_CO2E_PER_KG_FOOD_WASTE
             c1, c2 = st.columns(2)
-            c1.metric("Recommended Meals", f"{pred.suggested_meals}")
+            c1.metric(ui_policy.recommendation_label, f"{pred.suggested_meals}")
             c2.metric("Expected Visitors", f"{pred.predicted_visitors:.1f}")
             c3, c4 = st.columns(2)
             c3.metric("Estimated Food Saved", f"{estimated_food_saved:.1f} meals of food")

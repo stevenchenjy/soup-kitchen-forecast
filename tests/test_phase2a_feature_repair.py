@@ -34,6 +34,14 @@ from src.feature_sets import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+pytestmark = pytest.mark.skipif(
+    not (
+        ROOT
+        / "artifacts/ny_12550/model_optimization/phase1_origin_backtest"
+        / "phase1_manifest.json"
+    ).is_file(),
+    reason="Phase 2A reproduction requires ignored Phase 1 artifacts",
+)
 
 
 def test_phase1_gate_reproduces_all_published_references() -> None:

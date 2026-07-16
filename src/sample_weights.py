@@ -36,6 +36,7 @@ SAMPLE_WEIGHT_CANDIDATES: tuple[SampleWeightPolicy, ...] = (
 SAMPLE_WEIGHTS_BY_ID = {
     item.sample_weight_id: item for item in SAMPLE_WEIGHT_CANDIDATES
 }
+DECISION_EPSILON = 1e-12
 
 
 def resolve_sample_weight_policy(
@@ -141,14 +142,24 @@ def select_development_policy(
         - uniform["development_p90_absolute_error"]
     )
     weighted = table["sample_weight_id"] != SW_UNIFORM.sample_weight_id
-    table["passes_macro_threshold"] = weighted & table["macro_mae_improvement"].ge(0.25)
+    table["passes_macro_threshold"] = weighted & table["macro_mae_improvement"].ge(
+        0.25 - DECISION_EPSILON
+    )
     table["passes_recent_tail_threshold"] = weighted & table[
         "recent_tail_mae_improvement"
-    ].ge(0.15)
-    table["passes_s2_guardrail"] = weighted & table["s2_mae_change"].le(0.25)
-    table["passes_saturday_guardrail"] = weighted & table["saturday_mae_change"].le(0.40)
-    table["passes_sunday_guardrail"] = weighted & table["sunday_mae_change"].le(0.40)
-    table["passes_p90_guardrail"] = weighted & table["p90_change"].le(0.50)
+    ].ge(0.15 - DECISION_EPSILON)
+    table["passes_s2_guardrail"] = weighted & table["s2_mae_change"].le(
+        0.25 + DECISION_EPSILON
+    )
+    table["passes_saturday_guardrail"] = weighted & table[
+        "saturday_mae_change"
+    ].le(0.40 + DECISION_EPSILON)
+    table["passes_sunday_guardrail"] = weighted & table["sunday_mae_change"].le(
+        0.40 + DECISION_EPSILON
+    )
+    table["passes_p90_guardrail"] = weighted & table["p90_change"].le(
+        0.50 + DECISION_EPSILON
+    )
     rules = [
         "passes_macro_threshold",
         "passes_recent_tail_threshold",
@@ -216,7 +227,9 @@ def apply_confirmation_guardrail(
     }
     for output, (source, threshold) in changes.items():
         table[output] = table[source] - uniform[source]
-        table[f"passes_{output}"] = table[output].le(threshold)
+        table[f"passes_{output}"] = table[output].le(
+            threshold + DECISION_EPSILON
+        )
     pass_columns = [f"passes_{column}" for column in changes]
     table["passes_all_confirmation_guardrails"] = table[pass_columns].all(axis=1)
     if locked == SW_UNIFORM.sample_weight_id:

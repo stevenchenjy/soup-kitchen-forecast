@@ -6,9 +6,16 @@ import joblib
 import numpy as np
 import pandas as pd
 
+import src.config as config
 from src.config import DATE_COL, validate_forecast_target_date
 from src.data_processing import infer_next_service_date
 from src.features import add_basic_calendar_features, add_lag_features, merge_weather_features
+from src.production_features import (
+    MODEL_PACKAGE_SCHEMA_VERSION,
+    RECOMMENDATION_POLICY_ID,
+    build_locked_f6_feature_row,
+    validate_package_feature_contract,
+)
 from src.weather import WeatherClient
 
 
@@ -40,6 +47,33 @@ class VisitorPredictor:
         self.weather_zip_code = weather_context.get("zip_code", "12550")
         self.weather_country_code = weather_context.get("country_code", "US")
         self.weather_timezone = weather_context.get("timezone", "America/New_York")
+        self.model_package_schema_version = int(pack.get("model_package_schema_version", 1))
+        self.feature_contract = pack.get("feature_contract")
+        self.preprocessors = pack.get("preprocessors", {})
+        self.uses_locked_f6 = self.feature_contract is not None
+        if self.uses_locked_f6:
+            if self.model_package_schema_version != MODEL_PACKAGE_SCHEMA_VERSION:
+                raise ValueError("Unsupported F6 model-package schema version")
+            if not isinstance(self.feature_contract, dict):
+                raise ValueError("F6 model package feature_contract must be a mapping")
+            validate_package_feature_contract(self.feature_contract, self.feature_cols)
+            missing_preprocessors = set(self.models).difference(self.preprocessors)
+            if missing_preprocessors:
+                raise ValueError(
+                    f"F6 model package lacks preprocessors: {sorted(missing_preprocessors)}"
+                )
+            missing_quantiles = set(self.models).difference(self.quantile_models)
+            if missing_quantiles:
+                raise ValueError(
+                    f"C0 recommendation requires quantile models: {sorted(missing_quantiles)}"
+                )
+            self.recommendation_policy_id = pack.get("recommendation_policy_id")
+            if self.recommendation_policy_id != RECOMMENDATION_POLICY_ID:
+                raise ValueError("F6 model package recommendation policy is not locked C0")
+        else:
+            if self.model_package_schema_version != 1:
+                raise ValueError("Schema-v2 model packages require an F6 feature contract")
+            self.recommendation_policy_id = "LEGACY_MAX_OF_POINT_QUANTILE_AND_BUFFERS"
 
     @staticmethod
     def _segment_for_date(target_date: pd.Timestamp) -> str:
@@ -51,6 +85,15 @@ class VisitorPredictor:
         raise ValueError("target_date must be Saturday or Sunday")
 
     def _prepare_one_row(self, target_date: pd.Timestamp) -> pd.DataFrame:
+        if getattr(self, "uses_locked_f6", False):
+            today = pd.Timestamp(config.forecast_today(self.weather_timezone)).normalize()
+            origin = min(today, pd.Timestamp(target_date).normalize() - pd.Timedelta(days=1))
+            return build_locked_f6_feature_row(
+                self.history_df,
+                target_date,
+                origin,
+            )
+
         history = self.history_df.sort_values(DATE_COL).copy().reset_index(drop=True)
         row = {DATE_COL: pd.to_datetime(target_date), "visitors": np.nan}
         tmp = pd.concat([history[[DATE_COL, "visitors"]], pd.DataFrame([row])], ignore_index=True)
@@ -123,17 +166,27 @@ class VisitorPredictor:
             raise ValueError(f"No trained model for segment: {segment}")
 
         x = self._prepare_one_row(dt)
+        if getattr(self, "uses_locked_f6", False):
+            x = self.preprocessors[segment].transform(x)
         pred_point = float(self.models[segment].predict(x)[0])
         pred_q = float(self.quantile_models[segment].predict(x)[0]) if segment in self.quantile_models else pred_point
 
-        buffer_pct = self.default_meal_buffer_pct if meal_buffer_pct is None else meal_buffer_pct
-        residual_buf = float(self.residual_buffer_by_day.get(segment, 0.0))
-
-        suggested = max(
-            pred_point * (1 + buffer_pct),
-            pred_q,
-            pred_point + residual_buf,
-        )
+        if getattr(
+            self,
+            "recommendation_policy_id",
+            "LEGACY_MAX_OF_POINT_QUANTILE_AND_BUFFERS",
+        ) == RECOMMENDATION_POLICY_ID:
+            buffer_pct = 0.0
+            residual_buf = 0.0
+            suggested = pred_q
+        else:
+            buffer_pct = self.default_meal_buffer_pct if meal_buffer_pct is None else meal_buffer_pct
+            residual_buf = float(self.residual_buffer_by_day.get(segment, 0.0))
+            suggested = max(
+                pred_point * (1 + buffer_pct),
+                pred_q,
+                pred_point + residual_buf,
+            )
 
         return PredictionOutput(
             service_date=dt,

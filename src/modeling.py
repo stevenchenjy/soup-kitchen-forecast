@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import HistGradientBoostingRegressor, RandomForestRegressor
+from sklearn.impute import SimpleImputer
 from sklearn.metrics import mean_absolute_error, mean_absolute_percentage_error, root_mean_squared_error
 
 from src.config import DATE_COL, TARGET_COL
@@ -67,11 +68,15 @@ def rolling_backtest(
         point_model = make_point_model()
         q_model = make_quantile_model(quantile=quantile)
 
-        point_model.fit(train[feature_cols], train[TARGET_COL])
-        q_model.fit(train[feature_cols], train[TARGET_COL])
+        imputer = SimpleImputer(strategy="median", keep_empty_features=True)
+        x_train = imputer.fit_transform(train[feature_cols])
+        x_test = imputer.transform(test[feature_cols])
 
-        pred = float(point_model.predict(test[feature_cols])[0])
-        pred_q = float(q_model.predict(test[feature_cols])[0])
+        point_model.fit(x_train, train[TARGET_COL])
+        q_model.fit(x_train, train[TARGET_COL])
+
+        pred = float(point_model.predict(x_test)[0])
+        pred_q = float(q_model.predict(x_test)[0])
         actual = float(test[TARGET_COL].iloc[0])
 
         rows.append(
@@ -128,9 +133,12 @@ def fit_final_models_by_daytype(
     df: pd.DataFrame,
     feature_cols: list[str],
     quantile: float = 0.8,
-) -> tuple[dict, dict]:
+    *,
+    return_preprocessors: bool = False,
+) -> tuple[dict, dict] | tuple[dict, dict, dict]:
     models = {}
     q_models = {}
+    preprocessors = {}
     for key, flag in [("sat", 0), ("sun", 1)]:
         part = df[df["is_sun"] == flag].sort_values(DATE_COL).reset_index(drop=True)
         if part.empty:
@@ -138,9 +146,16 @@ def fit_final_models_by_daytype(
 
         m = make_point_model()
         qm = make_quantile_model(quantile=quantile)
-        m.fit(part[feature_cols], part[TARGET_COL])
-        qm.fit(part[feature_cols], part[TARGET_COL])
+        imputer = SimpleImputer(strategy="median", keep_empty_features=True)
+        transformed = imputer.fit_transform(part[feature_cols])
+        if transformed.shape[1] != len(feature_cols):
+            raise AssertionError("Final preprocessing changed the feature count")
+        m.fit(transformed, part[TARGET_COL])
+        qm.fit(transformed, part[TARGET_COL])
         models[key] = m
         q_models[key] = qm
+        preprocessors[key] = imputer
 
+    if return_preprocessors:
+        return models, q_models, preprocessors
     return models, q_models

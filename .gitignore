@@ -41,6 +41,9 @@ data/locations/*/attendance.db
 data/weather_daily*.csv
 data/locations/*/weather_daily.csv
 
+# Production-derived attendance exports are local research inputs, never source.
+data/locations/*/Updated/*.csv
+
 # Generated models
 models/*.joblib
 models/*.pkl

@@ -10,40 +10,23 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.config import DATE_COL, TARGET_COL, artifact_dir_for_location, location_weather_file, model_file_for_location
+from src.config import DATE_COL, TARGET_COL, artifact_dir_for_location, model_file_for_location
 from src.data_admin import bootstrap_location_from_csv, load_clean_data
-from src.features import build_training_frame
 from src.location_config import get_location
 from src.modeling import fit_final_models_by_daytype, rolling_backtest_by_daytype
-from src.weather import build_weather_dataset
-
-
-def _load_or_build_weather(location_id: str, service_dates: pd.Series) -> pd.DataFrame | None:
-    location = get_location(location_id)
-    weather_path = location_weather_file(location_id)
-
-    if weather_path.exists():
-        weather = pd.read_csv(weather_path)
-        return weather if not weather.empty else None
-
-    try:
-        return build_weather_dataset(
-            service_dates,
-            out_csv=weather_path,
-            zip_code=location.zip_code,
-            country=location.country_code,
-            timezone=location.timezone,
-        )
-    except Exception as exc:
-        print(f"Warning: weather fetch failed for {location_id}; training without weather features: {exc}")
-        return None
+from src.production_features import (
+    MODEL_PACKAGE_SCHEMA_VERSION,
+    RECOMMENDATION_POLICY_ID,
+    build_locked_f6_training_frame,
+    locked_feature_contract_metadata,
+    validate_lock_artifact,
+)
 
 
 def _write_predictions(outputs: dict, artifact_dir: Path) -> pd.DataFrame:
@@ -100,21 +83,14 @@ def _write_plots(predictions: pd.DataFrame, artifact_dir: Path) -> None:
     plt.close(fig)
 
 
-def _residual_buffer(predictions: pd.DataFrame) -> float:
-    if predictions.empty:
-        return 0.0
-    under_prediction = np.maximum(predictions["actual"] - predictions["pred"], 0)
-    return float(np.quantile(under_prediction, 0.8))
-
-
 def train_location(location_id: str, min_train_size: int = 18, quantile: float = 0.8) -> Path:
     bootstrap_location_from_csv(location_id)
     raw_df = load_clean_data(location_id)
     if raw_df.empty:
         raise ValueError(f"No historical data available for location '{location_id}'.")
 
-    weather_df = _load_or_build_weather(location_id, raw_df[DATE_COL])
-    bundle = build_training_frame(raw_df, weather_df)
+    validate_lock_artifact()
+    bundle = build_locked_f6_training_frame(raw_df)
     if bundle.df.empty:
         raise ValueError(f"Not enough historical data to train location '{location_id}'.")
 
@@ -124,7 +100,12 @@ def train_location(location_id: str, min_train_size: int = 18, quantile: float =
         min_train_size=min_train_size,
         quantile=quantile,
     )
-    models, quantile_models = fit_final_models_by_daytype(bundle.df, bundle.feature_cols, quantile=quantile)
+    models, quantile_models, preprocessors = fit_final_models_by_daytype(
+        bundle.df,
+        bundle.feature_cols,
+        quantile=quantile,
+        return_preprocessors=True,
+    )
     if not models:
         raise ValueError(f"No final models were trained for location '{location_id}'.")
 
@@ -135,20 +116,26 @@ def train_location(location_id: str, min_train_size: int = 18, quantile: float =
     _write_plots(predictions, artifact_dir)
 
     location = get_location(location_id)
-    residual_buffer_by_day = {
-        key: _residual_buffer(outputs.get(key, {}).get("predictions", pd.DataFrame()))
-        for key in ["sat", "sun"]
-    }
     model_path = model_file_for_location(location_id)
     model_path.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(
         {
+            "model_package_schema_version": MODEL_PACKAGE_SCHEMA_VERSION,
             "models": models,
             "quantile_models": quantile_models,
+            "preprocessors": preprocessors,
             "feature_cols": bundle.feature_cols,
-            "history_df": bundle.df.copy(),
-            "default_meal_buffer_pct": 0.08,
-            "residual_buffer_by_day": residual_buffer_by_day,
+            "feature_contract": locked_feature_contract_metadata(),
+            "history_df": bundle.history_df.copy(),
+            "recommendation_policy_id": RECOMMENDATION_POLICY_ID,
+            "default_meal_buffer_pct": 0.0,
+            "residual_buffer_by_day": {"sat": 0.0, "sun": 0.0},
+            "preprocessing_contract": {
+                "class": "SimpleImputer",
+                "strategy": "median",
+                "keep_empty_features": True,
+                "scope": "separate_saturday_sunday_full_training_segment",
+            },
             "weather_context": {
                 "zip_code": location.zip_code,
                 "country_code": location.country_code,

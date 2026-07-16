@@ -1,0 +1,7 @@
+{
+  "algorithm": "sha256",
+  "files": {
+    "model_package.joblib": "9eb8c75271c301f3f44ac864705c23a779c0a9f3fadedcfe896d5dea350e3397",
+    "metadata.json": "c5bdfb1396919342d2736ab1579dd3de7fc5f88c4619da7c4afacda2529b9854"
+  }
+}

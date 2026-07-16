@@ -201,14 +201,30 @@ def test_existing_schema_v1_package_remains_loadable_and_legacy() -> None:
 
 def test_candidate_destination_refuses_active_models_directory(tmp_path: Path) -> None:
     active_model = model_file_for_location("ny_12550")
-    with pytest.raises(ValueError, match="outside the active models directory"):
+    with pytest.raises(ValueError, match="outside active model paths"):
         train_f6_candidate.candidate_package_dir(
             "ny_12550", active_model, "f6-candidate-v1"
         )
-    with pytest.raises(ValueError, match="outside the active models directory"):
+    with pytest.raises(ValueError, match="outside active model paths"):
         train_f6_candidate.candidate_package_dir(
             "ny_12550", ROOT / "models", "f6-candidate-v1"
         )
+
+
+def test_candidate_destination_allows_only_versioned_candidate_area() -> None:
+    expected = (
+        ROOT / "models/candidates/ny_12550_f6_test_v99"
+    ).resolve()
+    assert train_f6_candidate.candidate_package_dir(
+        "ny_12550",
+        ROOT / "models/candidates",
+        "ny_12550_f6_test_v99",
+    ) == expected
+    for package_id in ("latest", "production", "model.joblib", "f6-candidate"):
+        with pytest.raises(ValueError, match="unversioned|explicit version"):
+            train_f6_candidate.candidate_package_dir(
+                "ny_12550", ROOT / "models/candidates", package_id
+            )
 
 
 def test_candidate_destination_refuses_overwrite(tmp_path: Path) -> None:
@@ -218,6 +234,46 @@ def test_candidate_destination_refuses_overwrite(tmp_path: Path) -> None:
         train_f6_candidate.candidate_package_dir(
             "ny_12550", tmp_path / "candidates", "f6-candidate-v1"
         )
+
+
+def test_candidate_csv_normalizes_aliases_and_preserves_source(tmp_path: Path) -> None:
+    attendance_path = tmp_path / "attendance.csv"
+    source = pd.DataFrame(
+        {
+            "Location ID": ["ny_12550", "ny_12550", "ny_12550"],
+            "Service date": ["2026-07-11", "2026-07-12", "2026-07-14"],
+            "Actual visitors served": [93, 170, 100],
+            "Audit note": ["a", "b", "weekday"],
+        }
+    )
+    source.to_csv(attendance_path, index=False)
+    source_hash = sha256(attendance_path)
+
+    frame, report = train_f6_candidate.validate_attendance_csv(
+        attendance_path,
+        location_id="ny_12550",
+    )
+
+    assert list(frame.columns) == [DATE_COL, TARGET_COL]
+    assert frame[DATE_COL].dt.date.astype(str).tolist() == [
+        "2026-07-11",
+        "2026-07-12",
+        "2026-07-14",
+    ]
+    assert frame[TARGET_COL].tolist() == [93.0, 170.0, 100.0]
+    assert report["column_names"] == [
+        "Location ID",
+        "Service date",
+        "Actual visitors served",
+        "Audit note",
+    ]
+    assert report["date_column"] == "Service date"
+    assert report["visitors_column"] == "Actual visitors served"
+    assert report["additional_columns"] == ["Location ID", "Audit note"]
+    assert report["non_weekend_service_dates"] == ["2026-07-14"]
+    assert report["training_eligible_weekend_rows"] == 2
+    assert report["source_location_ids"] == ["ny_12550"]
+    assert sha256(attendance_path) == source_hash
 
 
 def test_candidate_package_has_complete_metadata_checksums_and_no_activation(
@@ -264,6 +320,11 @@ def test_candidate_package_has_complete_metadata_checksums_and_no_activation(
         "requires_separate_activation_stage": True,
     }
     assert metadata["attendance_input"]["sha256"] == sha256(attendance_path)
+    assert metadata["attendance_input"]["row_count"] == len(attendance_history())
+    assert metadata["attendance_input"]["normalized_columns"] == [DATE_COL, TARGET_COL]
+    assert metadata["attendance_input"]["training_eligible_weekend_rows"] == len(
+        attendance_history()
+    )
     assert checksums["algorithm"] == "sha256"
     for filename, digest in checksums["files"].items():
         assert sha256(destination / filename) == digest
@@ -323,3 +384,4 @@ def test_tracked_active_models_and_source_data_remain_unchanged() -> None:
         "d4b0df65bebac69fe3069199cc71d062c2eea956102aafaf66425c1ce8a30d9d"
     )
     assert "data/locations/*/Updated/*.csv" in (ROOT / ".gitignore").read_text()
+    assert "data/updated/*.csv" in (ROOT / ".gitignore").read_text()

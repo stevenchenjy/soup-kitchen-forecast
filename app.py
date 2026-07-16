@@ -45,6 +45,7 @@ from src.prediction_logs import (
     update_prediction_logs_with_actual,
 )
 from src.predictor import VisitorPredictor, WeatherForecastUnavailableError
+from src.recommendation_ui import recommendation_ui_policy
 
 ROOT = Path(__file__).resolve().parent
 
@@ -156,10 +157,19 @@ def render_prediction():
                 st.error("Training failed")
         return
 
-    c1, c2 = st.columns(2)
-    with c1:
-        buffer_pct = st.slider("Base meal buffer (%)", min_value=0, max_value=30, value=8, step=1)
-    with c2:
+    ui_policy = recommendation_ui_policy(predictor)
+    st.caption(ui_policy.package_caption)
+    if ui_policy.show_percentage_buffer:
+        c1, c2 = st.columns(2)
+        with c1:
+            buffer_pct = st.slider(
+                "Base meal buffer (%)", min_value=0, max_value=30, value=8, step=1
+            )
+        with c2:
+            custom_date = st.text_input("Target service date (Sat/Sun, YYYY-MM-DD)", value="")
+    else:
+        buffer_pct = None
+        st.caption("F6/C0 uses the raw 80th-percentile recommendation without a percentage buffer.")
         custom_date = st.text_input("Target service date (Sat/Sun, YYYY-MM-DD)", value="")
 
     if st.button("Generate prediction", type="primary"):
@@ -167,12 +177,15 @@ def render_prediction():
             normalized_date = parse_service_date(custom_date) if custom_date else None
             if normalized_date is not None and normalized_date.isoformat() != custom_date.strip():
                 st.info(f"Using service date: {normalized_date.isoformat()}")
-            pred = predictor.predict_next(target_date=normalized_date, meal_buffer_pct=buffer_pct / 100.0)
+            meal_buffer_pct = buffer_pct / 100.0 if buffer_pct is not None else None
+            pred = predictor.predict_next(
+                target_date=normalized_date, meal_buffer_pct=meal_buffer_pct
+            )
             st.success(
                 f"Location: {location_id} | Service Date: {pred.service_date:%Y-%m-%d} | "
                 f"Segment: {pred.model_segment.upper()} | Point: {pred.predicted_visitors:.1f} | "
                 f"Quantile: {pred.predicted_quantile:.1f} | Residual Buffer: +{pred.residual_buffer:.1f} | "
-                f"Suggested Meals: {pred.suggested_meals}"
+                f"{ui_policy.recommendation_label}: {pred.suggested_meals}"
             )
             try:
                 save_prediction_log(location_id, pred, created_by=user["username"], source_app="admin")

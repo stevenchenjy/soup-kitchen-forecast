@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import joblib
 import numpy as np
@@ -37,6 +38,7 @@ class WeatherForecastUnavailableError(RuntimeError):
 class VisitorPredictor:
     def __init__(self, model_path: str):
         pack = joblib.load(model_path)
+        self.model_path = str(Path(model_path))
         self.models = pack["models"]
         self.quantile_models = pack["quantile_models"]
         self.feature_cols = pack["feature_cols"]
@@ -48,12 +50,16 @@ class VisitorPredictor:
         self.weather_country_code = weather_context.get("country_code", "US")
         self.weather_timezone = weather_context.get("timezone", "America/New_York")
         self.model_package_schema_version = int(pack.get("model_package_schema_version", 1))
+        self.package_id = str(pack.get("package_id") or Path(model_path).name)
         self.feature_contract = pack.get("feature_contract")
         self.preprocessors = pack.get("preprocessors", {})
-        self.uses_locked_f6 = self.feature_contract is not None
+        if self.model_package_schema_version not in {1, MODEL_PACKAGE_SCHEMA_VERSION}:
+            raise ValueError(
+                "Unsupported model-package schema version: "
+                f"{self.model_package_schema_version}"
+            )
+        self.uses_locked_f6 = self.model_package_schema_version == MODEL_PACKAGE_SCHEMA_VERSION
         if self.uses_locked_f6:
-            if self.model_package_schema_version != MODEL_PACKAGE_SCHEMA_VERSION:
-                raise ValueError("Unsupported F6 model-package schema version")
             if not isinstance(self.feature_contract, dict):
                 raise ValueError("F6 model package feature_contract must be a mapping")
             validate_package_feature_contract(self.feature_contract, self.feature_cols)
@@ -71,8 +77,8 @@ class VisitorPredictor:
             if self.recommendation_policy_id != RECOMMENDATION_POLICY_ID:
                 raise ValueError("F6 model package recommendation policy is not locked C0")
         else:
-            if self.model_package_schema_version != 1:
-                raise ValueError("Schema-v2 model packages require an F6 feature contract")
+            if self.feature_contract is not None:
+                raise ValueError("Schema-v1 model packages cannot declare an F6 feature contract")
             self.recommendation_policy_id = "LEGACY_MAX_OF_POINT_QUANTILE_AND_BUFFERS"
 
     @staticmethod

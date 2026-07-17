@@ -21,6 +21,10 @@ from scripts.train_backtest import train_location as train_legacy_location
 from scripts.train_f6_candidate import build_f6_model_package
 from src.config import artifact_dir_for_location, model_file_for_location
 from src.data_admin import load_clean_data
+from src.f6_monitoring import (
+    TRAINING_PROVENANCE_KEY,
+    f6_training_provenance_payload,
+)
 from src.location_config import Location, list_locations
 from src.model_publication import (
     atomic_publish_f6_package,
@@ -99,7 +103,11 @@ def _nightly_f6_package_id(location_id: str, attendance_df: pd.DataFrame) -> str
     return f"{location_id}_f6_nightly_{latest_service_date}_v1"
 
 
-def _write_f6_metrics(location_id: str, metrics: dict[str, Any]) -> None:
+def _write_f6_metrics(
+    location_id: str,
+    metrics: dict[str, Any],
+    package: dict[str, Any],
+) -> None:
     artifact_dir = artifact_dir_for_location(location_id)
     artifact_dir.mkdir(parents=True, exist_ok=True)
     destination = artifact_dir / "metrics.json"
@@ -108,7 +116,11 @@ def _write_f6_metrics(location_id: str, metrics: dict[str, Any]) -> None:
     )
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(metrics, handle, indent=2)
+            recorded_metrics = dict(metrics)
+            recorded_metrics[TRAINING_PROVENANCE_KEY] = (
+                f6_training_provenance_payload(package)
+            )
+            json.dump(recorded_metrics, handle, indent=2)
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
@@ -149,7 +161,7 @@ def train_f6_location(location: Location, attendance_df: pd.DataFrame) -> Path:
             expected_sha256=package_sha256,
             expected_package_id=package_id,
         )
-        _write_f6_metrics(location.id, metrics)
+        _write_f6_metrics(location.id, metrics, package)
         atomic_publish_f6_package(
             temporary_path,
             model_path,

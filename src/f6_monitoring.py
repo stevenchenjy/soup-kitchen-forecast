@@ -1,0 +1,478 @@
+"""Active-package-only F6 monitoring calculations for production dashboards."""
+
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+import math
+from statistics import fmean, median
+from typing import Any, Iterable, Mapping
+
+from src.feature_sets import F6
+from src.production_features import (
+    LOCKED_F6_FEATURE_ORDER_SHA256,
+    MODEL_PACKAGE_SCHEMA_VERSION,
+    RECOMMENDATION_POLICY_ID,
+)
+
+
+TRAINING_PROVENANCE_KEY = "_f6_package_provenance"
+
+
+@dataclass(frozen=True)
+class ActiveF6Package:
+    package_id: str
+    schema_version: int
+    feature_set_id: str
+    feature_count: int
+    feature_order_sha256: str
+    recommendation_policy_id: str
+
+
+class F6IntegrityError(ValueError):
+    """Raised when the active model does not satisfy the locked F6 contract."""
+
+
+def active_f6_package(predictor: Any) -> ActiveF6Package:
+    """Derive and validate the dashboard contract from the active model package."""
+
+    if predictor is None:
+        raise F6IntegrityError("The active F6 model could not be loaded.")
+
+    schema_version = int(getattr(predictor, "model_package_schema_version", 0))
+    feature_contract = getattr(predictor, "feature_contract", None)
+    if schema_version != MODEL_PACKAGE_SCHEMA_VERSION:
+        raise F6IntegrityError("The active model is not schema version 2.")
+    if not bool(getattr(predictor, "uses_locked_f6", False)):
+        raise F6IntegrityError("The active model is not a locked F6 package.")
+    if not isinstance(feature_contract, Mapping):
+        raise F6IntegrityError("The active F6 feature contract is unavailable.")
+
+    feature_set_id = str(feature_contract.get("feature_set_id") or "")
+    feature_hash = str(feature_contract.get("feature_order_sha256") or "")
+    recommendation_policy_id = str(
+        getattr(predictor, "recommendation_policy_id", "") or ""
+    )
+    feature_count = len(getattr(predictor, "feature_cols", ()))
+    package_id = str(getattr(predictor, "package_id", "") or "")
+
+    if not package_id:
+        raise F6IntegrityError("The active F6 package ID is unavailable.")
+    if feature_set_id != F6:
+        raise F6IntegrityError("The active feature set is not F6_COMPACT_SELECTED.")
+    if feature_count != 33:
+        raise F6IntegrityError("The active F6 package does not contain 33 features.")
+    if feature_hash != LOCKED_F6_FEATURE_ORDER_SHA256:
+        raise F6IntegrityError("The active F6 feature hash does not match the lock.")
+    if recommendation_policy_id != RECOMMENDATION_POLICY_ID:
+        raise F6IntegrityError("The active F6 recommendation policy is not locked C0.")
+
+    return ActiveF6Package(
+        package_id=package_id,
+        schema_version=schema_version,
+        feature_set_id=feature_set_id,
+        feature_count=feature_count,
+        feature_order_sha256=feature_hash,
+        recommendation_policy_id=recommendation_policy_id,
+    )
+
+
+def _schema_matches(value: Any, expected: int) -> bool:
+    try:
+        return int(value) == expected
+    except (TypeError, ValueError):
+        return False
+
+
+def row_matches_active_f6(
+    row: Mapping[str, Any], contract: ActiveF6Package
+) -> bool:
+    """Return whether all available row provenance agrees with the active package."""
+
+    if str(row.get("package_id") or "") != contract.package_id:
+        return False
+    if not _schema_matches(
+        row.get("model_package_schema_version"), contract.schema_version
+    ):
+        return False
+    if str(row.get("feature_set_id") or "") != contract.feature_set_id:
+        return False
+    if (
+        str(row.get("recommendation_policy_id") or "")
+        != contract.recommendation_policy_id
+    ):
+        return False
+
+    for hash_field in ("feature_order_sha256", "feature_hash"):
+        row_hash = row.get(hash_field)
+        if (
+            row_hash not in (None, "")
+            and str(row_hash) != contract.feature_order_sha256
+        ):
+            return False
+    return True
+
+
+def filter_active_f6_rows(
+    rows: Iterable[Mapping[str, Any]], contract: ActiveF6Package
+) -> list[dict[str, Any]]:
+    """Copy only rows that match the currently active F6 package contract."""
+
+    return [dict(row) for row in rows if row_matches_active_f6(row, contract)]
+
+
+def monitoring_stage(reconciled_count: int) -> str:
+    if reconciled_count <= 3:
+        return "INSUFFICIENT_DATA"
+    if reconciled_count <= 7:
+        return "EARLY_SIGNAL"
+    if reconciled_count <= 11:
+        return "INITIAL_REVIEW"
+    return "STABLE_REVIEW"
+
+
+def _finite_number(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _reconciled_rows(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    reconciled: list[dict[str, Any]] = []
+    for row in rows:
+        actual = _finite_number(row.get("actual_visitors"))
+        predicted = _finite_number(row.get("predicted_visitors"))
+        if actual is None or predicted is None:
+            continue
+        item = dict(row)
+        item["_actual"] = actual
+        item["_predicted"] = predicted
+        item["_absolute_error"] = abs(predicted - actual)
+        reconciled.append(item)
+    return reconciled
+
+
+def _mean_or_none(values: Iterable[float]) -> float | None:
+    materialized = list(values)
+    return fmean(materialized) if materialized else None
+
+
+def _mae(rows: Iterable[Mapping[str, Any]]) -> float | None:
+    return _mean_or_none(float(row["_absolute_error"]) for row in rows)
+
+
+def _quantile_coverage(rows: Iterable[Mapping[str, Any]]) -> float | None:
+    covered: list[float] = []
+    for row in rows:
+        quantile = _finite_number(row.get("predicted_quantile"))
+        if quantile is None:
+            continue
+        covered.append(1.0 if float(row["_actual"]) <= quantile else 0.0)
+    return _mean_or_none(covered)
+
+
+def _segment_rows(
+    rows: Iterable[Mapping[str, Any]], segment: str
+) -> list[Mapping[str, Any]]:
+    return [row for row in rows if str(row.get("model_segment") or "") == segment]
+
+
+def _horizon_rows(
+    rows: Iterable[Mapping[str, Any]], horizon: int
+) -> list[Mapping[str, Any]]:
+    selected: list[Mapping[str, Any]] = []
+    for row in rows:
+        try:
+            value = int(row.get("service_horizon"))
+        except (TypeError, ValueError):
+            continue
+        if value == horizon:
+            selected.append(row)
+    return selected
+
+
+def _latest_rows(rows: Iterable[Mapping[str, Any]], limit: int) -> list[dict[str, Any]]:
+    ordered = sorted(
+        (dict(row) for row in rows),
+        key=lambda row: (
+            str(row.get("service_date") or ""),
+            str(row.get("prediction_created_at") or ""),
+            int(row.get("id") or 0),
+        ),
+        reverse=True,
+    )
+    return ordered[:limit]
+
+
+def _empty_report(message: str) -> dict[str, Any]:
+    return {
+        "integrity_ok": False,
+        "integrity_errors": [message],
+        "contract": None,
+        "prediction_count": None,
+        "reconciled_count": None,
+        "unreconciled_count": None,
+        "stage": None,
+        "metrics": None,
+        "segments": None,
+        "horizons": None,
+        "latest_outcomes": [],
+        "sustainability": None,
+        "integrity_alerts": [],
+        "performance_alerts": [],
+    }
+
+
+def build_f6_monitoring_report(
+    predictor: Any,
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    load_error: Exception | None = None,
+    latest_limit: int = 20,
+) -> dict[str, Any]:
+    """Build metrics and outcomes exclusively from the active F6 package rows."""
+
+    if load_error is not None:
+        return _empty_report("The active F6 model could not be loaded.")
+    try:
+        contract = active_f6_package(predictor)
+    except (F6IntegrityError, TypeError, ValueError) as exc:
+        return _empty_report(str(exc))
+
+    active_rows = filter_active_f6_rows(rows, contract)
+    reconciled = _reconciled_rows(active_rows)
+    reconciled_count = len(reconciled)
+    prediction_count = len(active_rows)
+    unreconciled_count = prediction_count - reconciled_count
+    stage = monitoring_stage(reconciled_count)
+
+    absolute_errors = [float(row["_absolute_error"]) for row in reconciled]
+    signed_errors = [
+        float(row["_predicted"]) - float(row["_actual"]) for row in reconciled
+    ]
+    underprediction = [
+        1.0 if float(row["_predicted"]) < float(row["_actual"]) else 0.0
+        for row in reconciled
+    ]
+    over_preparation: list[float] = []
+    under_preparation: list[float] = []
+    for row in reconciled:
+        meals = _finite_number(row.get("suggested_meals"))
+        if meals is None:
+            continue
+        actual = float(row["_actual"])
+        over_preparation.append(max(meals - actual, 0.0))
+        under_preparation.append(max(actual - meals, 0.0))
+
+    metrics = {
+        "mae": _mean_or_none(absolute_errors),
+        "median_absolute_error": median(absolute_errors) if absolute_errors else None,
+        "rmse": (
+            math.sqrt(fmean(error * error for error in absolute_errors))
+            if absolute_errors
+            else None
+        ),
+        "mean_signed_error": _mean_or_none(signed_errors),
+        "underprediction_rate": _mean_or_none(underprediction),
+        "q80_empirical_coverage": _quantile_coverage(reconciled),
+        "mean_over_preparation": _mean_or_none(over_preparation),
+        "mean_under_preparation": _mean_or_none(under_preparation),
+    }
+
+    segments: dict[str, dict[str, Any]] = {}
+    for label, value in (("Saturday", "sat"), ("Sunday", "sun")):
+        selected = _segment_rows(reconciled, value)
+        segments[label] = {"reconciled_count": len(selected), "mae": _mae(selected)}
+
+    horizons: dict[str, dict[str, Any]] = {}
+    for horizon in (1, 2, 5):
+        selected = _horizon_rows(reconciled, horizon)
+        horizons[f"H{horizon}"] = {
+            "reconciled_count": len(selected),
+            "mae": _mae(selected),
+            "q80_empirical_coverage": _quantile_coverage(selected),
+        }
+
+    missing_hash_count = sum(
+        1
+        for row in active_rows
+        if row.get("feature_order_sha256") in (None, "")
+        and row.get("feature_hash") in (None, "")
+    )
+    invalid_reconciled_count = sum(
+        1
+        for row in active_rows
+        if row.get("actual_visitors") is not None
+        and (
+            _finite_number(row.get("actual_visitors")) is None
+            or _finite_number(row.get("predicted_visitors")) is None
+        )
+    )
+    integrity_alerts: list[str] = []
+    if missing_hash_count:
+        integrity_alerts.append(
+            f"{missing_hash_count} active F6 prediction row(s) do not contain feature-hash provenance."
+        )
+    if invalid_reconciled_count:
+        integrity_alerts.append(
+            f"{invalid_reconciled_count} active F6 row(s) have invalid reconciliation values."
+        )
+
+    performance_alerts: list[str] = []
+    if reconciled_count <= 3:
+        performance_alerts.append(
+            "F6 performance is insufficient for operational conclusions."
+        )
+    else:
+        coverage = metrics["q80_empirical_coverage"]
+        if coverage is not None and coverage < 0.80:
+            performance_alerts.append("F6 Q80 empirical coverage is below 80%.")
+        under_rate = metrics["underprediction_rate"]
+        if under_rate is not None and under_rate > 0.50:
+            performance_alerts.append(
+                "F6 point predictions underpredict more than half of reconciled services."
+            )
+
+    waste_values = [
+        value
+        for row in active_rows
+        if (value := _finite_number(row.get("waste_avoided_meals"))) is not None
+    ]
+    co2e_values = [
+        value
+        for row in active_rows
+        if (value := _finite_number(row.get("estimated_co2e_reduction_kg")))
+        is not None
+    ]
+
+    return {
+        "integrity_ok": True,
+        "integrity_errors": [],
+        "contract": asdict(contract),
+        "prediction_count": prediction_count,
+        "reconciled_count": reconciled_count,
+        "unreconciled_count": unreconciled_count,
+        "stage": stage,
+        "metrics": metrics,
+        "segments": segments,
+        "horizons": horizons,
+        "latest_outcomes": _latest_rows(active_rows, latest_limit),
+        "sustainability": {
+            "total_estimated_waste_avoided_meals": sum(waste_values),
+            "total_estimated_co2e_reduction_kg": sum(co2e_values),
+        },
+        "integrity_alerts": integrity_alerts,
+        "performance_alerts": performance_alerts,
+    }
+
+
+def training_run_provenance(run: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+    if not isinstance(run, Mapping):
+        return None
+    metrics = run.get("metrics")
+    if isinstance(metrics, str):
+        return None
+    if isinstance(metrics, Mapping):
+        provenance = metrics.get(TRAINING_PROVENANCE_KEY)
+        if isinstance(provenance, Mapping):
+            return provenance
+    direct = {
+        key: run.get(key)
+        for key in (
+            "package_id",
+            "model_package_schema_version",
+            "feature_set_id",
+            "feature_order_sha256",
+            "recommendation_policy_id",
+        )
+    }
+    return direct if any(value is not None for value in direct.values()) else None
+
+
+def training_run_matches_active_f6(
+    run: Mapping[str, Any] | None, contract: ActiveF6Package
+) -> bool:
+    provenance = training_run_provenance(run)
+    if provenance is None:
+        return False
+    return (
+        str(provenance.get("package_id") or "") == contract.package_id
+        and _schema_matches(
+            provenance.get("model_package_schema_version"), contract.schema_version
+        )
+        and str(provenance.get("feature_set_id") or "") == contract.feature_set_id
+        and str(provenance.get("feature_order_sha256") or "")
+        == contract.feature_order_sha256
+        and str(provenance.get("recommendation_policy_id") or "")
+        == contract.recommendation_policy_id
+    )
+
+
+def f6_training_status(
+    contract: ActiveF6Package,
+    *,
+    retrain_state: Mapping[str, Any] | None,
+    latest_run: Mapping[str, Any] | None,
+    latest_successful_run: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Suppress unproven training runs and describe the active F6 status."""
+
+    dirty = bool(retrain_state and retrain_state.get("dirty"))
+    matching_latest = (
+        dict(latest_run)
+        if training_run_matches_active_f6(latest_run, contract)
+        else None
+    )
+    matching_success = (
+        dict(latest_successful_run)
+        if training_run_matches_active_f6(latest_successful_run, contract)
+        else None
+    )
+
+    if matching_success is None:
+        message = "Activated from verified candidate; first genuine F6 retraining pending"
+        latest_successful_at = None
+    else:
+        message = "Confirmed F6 training run available"
+        latest_successful_at = matching_success.get("finished_at")
+
+    if dirty:
+        status = "RETRAINING_REQUIRED"
+    elif matching_latest is not None:
+        status = str(matching_latest.get("status") or "UNKNOWN").upper()
+    elif matching_success is not None:
+        status = "SUCCESS"
+    else:
+        status = "PENDING_FIRST_F6_RETRAIN"
+
+    return {
+        "needs_retraining": dirty,
+        "status": status,
+        "latest_successful_at": latest_successful_at,
+        "attendance_rows": (
+            matching_latest.get("attendance_rows")
+            if matching_latest is not None
+            else matching_success.get("attendance_rows")
+            if matching_success is not None
+            else None
+        ),
+        "message": message,
+    }
+
+
+def f6_training_provenance_payload(package: Mapping[str, Any]) -> dict[str, Any]:
+    """Build JSON-safe package provenance for future training-run records."""
+
+    feature_contract = package.get("feature_contract")
+    if not isinstance(feature_contract, Mapping):
+        raise F6IntegrityError("F6 training package feature contract is unavailable.")
+    return {
+        "package_id": package.get("package_id"),
+        "model_package_schema_version": package.get(
+            "model_package_schema_version"
+        ),
+        "feature_set_id": feature_contract.get("feature_set_id"),
+        "feature_order_sha256": feature_contract.get("feature_order_sha256"),
+        "recommendation_policy_id": package.get("recommendation_policy_id"),
+    }

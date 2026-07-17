@@ -22,7 +22,6 @@ from src.f6_monitoring import F6IntegrityError, active_f6_package
 from src.location_config import list_locations
 from src.prediction_logs import save_prediction_log, update_prediction_logs_with_actual
 from src.predictor import VisitorPredictor, WeatherForecastUnavailableError
-from src.recommendation_ui import recommendation_ui_policy
 
 st.set_page_config(page_title="Staff Meal Prep Assistant", layout="centered")
 
@@ -82,7 +81,7 @@ locations = get_authorized_locations(user, all_locations)
 loc_names = {loc.name: loc.id for loc in locations}
 
 st.title("Staff Meal Prep Assistant")
-st.caption("Per-location view with independent data/model storage")
+st.caption("Plan meals and record attendance for your location.")
 
 sidebar = st.sidebar
 sidebar.markdown(f"**User:** {user['username']} ({user['role']})")
@@ -112,26 +111,25 @@ if model_path.exists():
     except Exception as exc:
         model_load_error = exc
 active_package = None
-f6_integrity_error = None
 if predictor is not None:
     try:
         active_package = active_f6_package(predictor)
-    except F6IntegrityError as exc:
-        f6_integrity_error = str(exc)
-else:
-    f6_integrity_error = "The active F6 model could not be loaded."
+    except F6IntegrityError:
+        pass
 delete_message = st.session_state.pop("staff_delete_message", None)
 if delete_message:
     st.success(delete_message)
 
 st.subheader(f"Daily Actions - {selected_name}")
 if active_package is None:
-    st.error("F6 integrity error")
-    st.caption(f6_integrity_error or "The active F6 contract is unavailable.")
+    st.error("Forecast unavailable")
+    st.caption(
+        "The forecasting system failed an integrity check. Please contact an administrator."
+    )
 else:
-    ui_policy = recommendation_ui_policy(predictor)
-    st.caption(ui_policy.package_caption)
-    st.caption("Recommendation policy: C0 raw Q80")
+    st.caption(
+        "Recommended meals include a built-in safety margin based on expected attendance."
+    )
     custom_date = st.text_input("Target service date (Saturday/Sunday, YYYY-MM-DD)", value="")
     if st.button("Get meal recommendation", type="primary"):
         try:
@@ -156,7 +154,7 @@ else:
             c1, c2, c3 = st.columns(3)
             c1.metric("Service date", pred.service_date.strftime("%Y-%m-%d"))
             c2.metric("Expected visitors", f"{pred.predicted_visitors:.1f}")
-            c3.metric("Raw Q80 recommended meals", f"{pred.suggested_meals}")
+            c3.metric("Recommended meals", f"{pred.suggested_meals}")
             try:
                 save_prediction_log(location_id, pred, created_by=user["username"], source_app="staff")
             except Exception:

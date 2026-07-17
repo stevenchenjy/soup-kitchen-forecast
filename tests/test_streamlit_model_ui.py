@@ -156,8 +156,8 @@ def _mixed_history_rows() -> list[dict[str, Any]]:
             schema_version=1,
             feature_set_id=None,
             policy_id="OLDER_POLICY",
-            waste=500.0,
-            co2e=855.0,
+            waste=21.6,
+            co2e=36.936,
         )
         for index in range(1, 11)
     ]
@@ -251,11 +251,13 @@ def _configure_common_patches(
     saved_logs: list[tuple[Any, ...]],
     f6: bool,
     prediction_rows: list[dict[str, Any]] | None = None,
+    attendance_frame: pd.DataFrame | None = None,
     retrain_state: dict[str, Any] | None = None,
     latest_run: dict[str, Any] | None = None,
     latest_successful_run: dict[str, Any] | None = None,
 ) -> None:
     users = [user]
+    attendance = ATTENDANCE if attendance_frame is None else attendance_frame
     stack.enter_context(
         patch.dict(
             "os.environ",
@@ -303,10 +305,10 @@ def _configure_common_patches(
     )
 
     stack.enter_context(
-        patch("src.data_admin.load_clean_data", return_value=ATTENDANCE.copy())
+        patch("src.data_admin.load_clean_data", return_value=attendance.copy())
     )
     stack.enter_context(
-        patch("src.data_admin.load_recent_attendance", return_value=ATTENDANCE.copy())
+        patch("src.data_admin.load_recent_attendance", return_value=attendance.copy())
     )
     stack.enter_context(
         patch("src.data_admin.latest_staff_created_attendance", return_value=None)
@@ -437,10 +439,11 @@ def _run_prediction_ui(
         assert len(saved_logs) == 1
         logged_prediction = saved_logs[0][1]
         assert prediction_signature(logged_prediction) == prediction_signature(direct)
+        recommendation_label = "Recommended meals"
         recommendation_metric = next(
             element
             for element in app.metric
-            if element.label == "Raw Q80 recommended meals"
+            if element.label == recommendation_label
         )
         assert str(recommendation_metric.value) == str(direct.suggested_meals)
 
@@ -461,6 +464,12 @@ def _run_admin_monitoring_ui(
     latest_successful_run: dict[str, Any] | None = None,
 ) -> AppTest:
     saved_logs: list[tuple[Any, ...]] = []
+    attendance = pd.DataFrame(
+        {
+            "service_date": pd.date_range("2025-07-18", periods=360, freq="D"),
+            "visitors": [100] * 360,
+        }
+    )
     with TemporaryDirectory() as artifact_directory, ExitStack() as stack:
         _configure_common_patches(
             stack,
@@ -470,6 +479,7 @@ def _run_admin_monitoring_ui(
             saved_logs=saved_logs,
             f6=True,
             prediction_rows=prediction_rows,
+            attendance_frame=attendance,
             latest_run=latest_run,
             latest_successful_run=latest_successful_run,
         )
@@ -511,15 +521,10 @@ def test_active_f6_admin_and_staff_prediction_paths(
         f6=True,
     )
     text = result["rendered_text"]
-    assert "ny_12550_f6_2026-07-12_v1" in text
-    assert "schema v2" in text
-    assert "F6_COMPACT_SELECTED" in text
-    assert "Recommendation policy: C0 raw Q80" in text
     assert all("buffer (%)" not in label.lower() for label in result["slider_labels"])
     assert result["prediction"]["model_segment"] == segment
     assert result["prediction"]["meal_buffer_pct"] == 0.0
     assert result["prediction"]["residual_buffer"] == 0.0
-    assert "Raw Q80 recommended meals" in result["metric_labels"]
     forbidden = (
         "legacy",
         "fallback",
@@ -529,46 +534,89 @@ def test_active_f6_admin_and_staff_prediction_paths(
         "residual buffer",
     )
     assert all(term not in text.lower() for term in forbidden)
-    if app_filename == "app_staff.py":
+    if app_filename == "app.py":
+        assert "ny_12550_f6_2026-07-12_v1" in text
+        assert "Schema Version" in text
+        assert "F6_COMPACT_SELECTED" in text
+        assert "C0_EXISTING_RAW_QUANTILE" in text
+        assert "Recommended meals" in result["metric_labels"]
+    else:
+        assert "Recommended meals" in result["metric_labels"]
+        assert (
+            "Recommended meals include a built-in safety margin based on expected attendance."
+            in text
+        )
         assert "waste avoided" not in text.lower()
         assert "co2e" not in text.lower()
+        assert all(
+            term not in text.lower()
+            for term in (
+                "f6",
+                "schema",
+                "package",
+                "feature set",
+                "c0",
+                "q80",
+                "raw",
+                "model storage",
+            )
+        )
 
 
-def test_admin_monitoring_uses_only_active_f6_rows_from_mixed_history() -> None:
+def test_admin_monitoring_separates_backtest_live_and_operational_scopes() -> None:
     old_run = {
         "status": "success",
         "finished_at": "2026-07-13T10:21:30+00:00",
         "attendance_rows": 360,
         "metrics": {"overall": {"MAE": 999.0}},
     }
+    all_rows = _mixed_history_rows()
+    rows = all_rows[:10] + [all_rows[10], all_rows[11], all_rows[13]]
     app = _run_admin_monitoring_ui(
-        _mixed_history_rows(),
+        rows,
         latest_run=old_run,
         latest_successful_run=old_run,
     )
     metrics = _metric_values(app)
-    assert metrics["F6 predictions"] == "3"
-    assert metrics["F6 reconciled predictions"] == "2"
-    assert metrics["F6 unreconciled predictions"] == "1"
-    assert metrics["F6 review stage"] == "INSUFFICIENT_DATA"
-    assert metrics["F6 MAE"] == "15.00"
-    assert metrics["F6 median absolute error"] == "15.00"
-    assert metrics["F6 RMSE"] == "15.81"
-    assert metrics["F6 mean signed error"] == "5.00"
-    assert metrics["F6 underprediction rate"] == "50.0%"
-    assert metrics["F6 Q80 empirical coverage"] == "100.0%"
-    assert metrics["F6 Saturday MAE"] == "10.00"
-    assert metrics["F6 Sunday MAE"] == "20.00"
-    assert metrics["F6 estimated waste avoided"] == "35.0 meals"
-    assert metrics["F6 estimated CO2e reduction"] == "59.9 kg"
+    assert metrics["MAE"] == "13.63"
+    assert metrics["Median Absolute Error"] == "10.25"
+    assert metrics["RMSE"] == "17.74"
+    assert metrics["Mean Signed Error"] == "0.23"
+    assert metrics["Underprediction Rate"] == "57.8%"
+    assert metrics["Q80 Empirical Coverage"] == "68.3%"
+    assert metrics["Mean Over-Preparation"] == "12.34"
+    assert metrics["Mean Under-Preparation"] == "3.13"
+    assert metrics["Saturday MAE"] == "13.62"
+    assert metrics["Sunday MAE"] == "13.63"
+    assert metrics["H1 MAE"] == "13.61"
+    assert metrics["H2 MAE"] == "13.63"
+    assert metrics["H5 MAE"] == "14.21"
+    assert metrics["Production Predictions"] == "3"
+    assert metrics["Reconciled Predictions"] == "2"
+    assert metrics["Unreconciled Predictions"] == "1"
+    assert metrics["Monitoring Stage"] == "Insufficient data"
+    assert metrics["Attendance Rows"] == "360"
+    assert metrics["Total Prediction Logs"] == "13"
+    assert metrics["Logs Reconciled with Actuals"] == "12"
+    assert metrics["Estimated Food Saved"] == "251.0 meals"
+    assert metrics["Estimated CO₂e Reduction"] == "429.2 kg"
 
     text = _element_text(app)
-    assert "Activated from verified candidate; first genuine F6 retraining pending" in text
+    assert "Model Performance" in text
+    assert "Live Performance" in text
+    assert "Operational Impact" in text
+    assert "Origin-aware historical backtest using attendance through July 12, 2026." in text
+    assert (
+        "Activated from verified candidate; first genuine production retraining pending."
+        in text
+    )
     assert "2026-07-13T10:21:30+00:00" not in text
     assert "999.0" not in text
     assert "Live MAE" not in metrics
     assert "MAPE" not in metrics
     assert "P90AbsError" not in metrics
+    assert not [label for label in metrics if label.startswith("F6")]
+    assert "F6-only performance" not in text
 
     outcomes = _rendered_dataframe(
         app,
@@ -582,29 +630,66 @@ def test_admin_monitoring_uses_only_active_f6_rows_from_mixed_history() -> None:
     assert outcomes["Expected visitors"].tolist() == [120.0, 150.0, 100.0]
 
 
-def test_admin_monitoring_zero_f6_rows_shows_insufficient_data_without_fallback() -> None:
+def test_admin_live_metrics_appear_from_active_rows_only_after_early_threshold() -> None:
+    rows = _mixed_history_rows()[:12]
+    rows.extend(
+        [
+            _active_f6_row(
+                row_id=15,
+                service_date="2026-07-25",
+                predicted=95.0,
+                quantile=110.0,
+                suggested=110,
+                actual=100,
+                segment="sat",
+                horizon=1,
+            ),
+            _active_f6_row(
+                row_id=16,
+                service_date="2026-07-26",
+                predicted=115.0,
+                quantile=135.0,
+                suggested=135,
+                actual=100,
+                segment="sun",
+                horizon=2,
+            ),
+        ]
+    )
+    app = _run_admin_monitoring_ui(rows)
+    metrics = _metric_values(app)
+
+    assert metrics["MAE"] == "13.63"
+    assert metrics["Live MAE"] == "12.50"
+    assert metrics["Production Predictions"] == "4"
+    assert metrics["Reconciled Predictions"] == "4"
+    assert metrics["Monitoring Stage"] == "Early signal"
+    assert "999.0" not in _element_text(app)
+
+
+def test_admin_monitoring_zero_live_rows_keeps_backtest_and_cumulative_impact() -> None:
     app = _run_admin_monitoring_ui(_mixed_history_rows()[:10])
     metrics = _metric_values(app)
-    assert metrics["F6 predictions"] == "0"
-    assert metrics["F6 reconciled predictions"] == "0"
-    assert metrics["F6 unreconciled predictions"] == "0"
-    assert metrics["F6 review stage"] == "INSUFFICIENT_DATA"
-    for label in (
-        "F6 MAE",
-        "F6 median absolute error",
-        "F6 RMSE",
-        "F6 mean signed error",
-        "F6 underprediction rate",
-        "F6 Q80 empirical coverage",
-        "F6 mean over-preparation",
-        "F6 mean under-preparation",
-        "F6 Saturday MAE",
-        "F6 Sunday MAE",
-    ):
-        assert metrics[label] == "—"
+    assert metrics["MAE"] == "13.63"
+    assert metrics["RMSE"] == "17.74"
+    assert metrics["Production Predictions"] == "0"
+    assert metrics["Reconciled Predictions"] == "0"
+    assert metrics["Unreconciled Predictions"] == "0"
+    assert metrics["Monitoring Stage"] == "Insufficient data"
+    assert metrics["Attendance Rows"] == "360"
+    assert metrics["Total Prediction Logs"] == "10"
+    assert metrics["Logs Reconciled with Actuals"] == "10"
+    assert metrics["Estimated Food Saved"] == "216.0 meals"
+    assert metrics["Estimated CO₂e Reduction"] == "369.4 kg"
     text = _element_text(app)
-    assert "F6 performance: Insufficient data" in text
-    assert "No active-package F6 predictions are available yet." in text
+    assert (
+        "Insufficient production data. Live metrics will appear after actual attendance is recorded."
+        in text
+    )
+    assert "No active-model production predictions are available yet." in text
+    assert "Model Performance" in text
+    assert "F6-only performance" not in text
+    assert not [label for label in metrics if label.startswith("F6")]
     assert "fallback" not in text.lower()
 
 
@@ -631,7 +716,8 @@ def test_non_f6_active_package_suppresses_production_prediction_ui(
 
     assert not app.exception
     text = _element_text(app)
-    assert "F6 integrity error" in text
+    expected_error = "F6 integrity error" if app_filename == "app.py" else "Forecast unavailable"
+    assert expected_error in text
     assert not [
         item
         for item in app.text_input
@@ -642,9 +728,23 @@ def test_non_f6_active_package_suppresses_production_prediction_ui(
         for button in app.button
         if button.label in {"Generate prediction", "Get meal recommendation"}
     ]
-    assert "F6 MAE" not in _metric_values(app)
+    assert "MAE" not in _metric_values(app)
     assert all(
         term not in text.lower()
         for term in ("legacy", "fallback", "rollback", "schema v1")
     )
+    if app_filename == "app_staff.py":
+        assert all(
+            term not in text.lower()
+            for term in (
+                "f6",
+                "schema",
+                "package",
+                "feature set",
+                "c0",
+                "q80",
+                "raw",
+                "model storage",
+            )
+        )
     assert saved_logs == []

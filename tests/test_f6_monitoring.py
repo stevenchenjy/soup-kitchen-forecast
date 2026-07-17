@@ -1,19 +1,24 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pandas as pd
 import pytest
 
 from src import prediction_logs
 from src.f6_monitoring import (
     ActiveF6Package,
+    BacktestSummaryError,
     TRAINING_PROVENANCE_KEY,
     active_f6_package,
+    build_operational_impact,
     build_f6_monitoring_report,
     f6_training_status,
     filter_active_f6_rows,
+    load_verified_backtest_summary,
     monitoring_stage,
 )
 from src.production_features import LOCKED_F6_FEATURE_ORDER_SHA256
@@ -22,6 +27,7 @@ from src.production_features import LOCKED_F6_FEATURE_ORDER_SHA256
 PACKAGE_ID = "ny_12550_f6_2026-07-12_v1"
 FEATURE_SET_ID = "F6_COMPACT_SELECTED"
 POLICY_ID = "C0_EXISTING_RAW_QUANTILE"
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def predictor(package_id: str = PACKAGE_ID, **overrides):
@@ -209,6 +215,119 @@ def test_mixed_input_produces_active_f6_only_metrics_and_sustainability() -> Non
     }
 
 
+def test_verified_backtest_summary_loads_exact_active_package_metrics() -> None:
+    summary = load_verified_backtest_summary(active_f6_package(predictor()))
+
+    assert summary["attendance_cutoff"] == "2026-07-12"
+    assert summary["evaluation"]["design"] == "origin_aware"
+    assert summary["evaluation"]["row_count"] == 322
+    assert summary["metrics"]["mae"] == pytest.approx(13.62696513246822)
+    assert summary["metrics"]["rmse"] == pytest.approx(17.738338356170434)
+    assert summary["metrics"]["median_absolute_error"] == pytest.approx(
+        10.253146148989984
+    )
+    assert summary["segments"]["Saturday"]["mae"] == pytest.approx(
+        13.622258066963107
+    )
+    assert summary["segments"]["Sunday"]["mae"] == pytest.approx(
+        13.631790614715598
+    )
+    assert summary["horizons"]["H1"]["mae"] == pytest.approx(
+        13.612895542207069
+    )
+    assert summary["horizons"]["H2"]["mae"] == pytest.approx(
+        13.632493365962487
+    )
+    assert summary["horizons"]["H5"]["mae"] == pytest.approx(
+        14.21230873930077
+    )
+
+
+def test_verified_backtest_summary_values_match_authoritative_artifacts() -> None:
+    summary = load_verified_backtest_summary(active_f6_package(predictor()))
+    metadata = json.loads(
+        (
+            ROOT
+            / "models/candidates/ny_12550_f6_2026-07-12_v1/metadata.json"
+        ).read_text(encoding="utf-8")
+    )
+    point_metrics = pd.read_csv(
+        ROOT
+        / "artifacts/ny_12550/model_optimization/phase2b1_training_windows/06_training_window_metrics.csv"
+    )
+    operational_metrics = pd.read_csv(
+        ROOT
+        / "artifacts/ny_12550/model_optimization/phase2c_lite_calibration/10_daytype_scenario_horizon.csv"
+    )
+    primary = point_metrics[
+        point_metrics["training_window_id"].eq("TW_EXPANDING")
+        & point_metrics["evaluation_scope"].eq("scenario")
+        & point_metrics["scope_value"].eq("S3_next_service")
+    ].iloc[0]
+    preparation = operational_metrics[
+        operational_metrics["calibration_policy_id"].eq(POLICY_ID)
+        & operational_metrics["scope_type"].eq("scenario")
+        & operational_metrics["scope_value"].eq("S3_next_service")
+    ].iloc[0]
+
+    assert summary["metrics"]["mae"] == pytest.approx(
+        metadata["metrics"]["overall"]["MAE"]
+    )
+    assert summary["metrics"]["rmse"] == pytest.approx(
+        metadata["metrics"]["overall"]["RMSE"]
+    )
+    assert summary["segments"]["Saturday"]["mae"] == pytest.approx(
+        metadata["metrics"]["sat"]["MAE"]
+    )
+    assert summary["segments"]["Sunday"]["mae"] == pytest.approx(
+        metadata["metrics"]["sun"]["MAE"]
+    )
+    assert summary["metrics"]["median_absolute_error"] == pytest.approx(
+        primary["median_absolute_error"]
+    )
+    assert summary["metrics"]["mean_signed_error"] == pytest.approx(
+        primary["mean_signed_error"]
+    )
+    assert summary["metrics"]["underprediction_rate"] == pytest.approx(
+        primary["underprediction_frequency"]
+    )
+    assert summary["metrics"]["q80_empirical_coverage"] == pytest.approx(
+        primary["raw_quantile_coverage"]
+    )
+    assert summary["metrics"]["mean_over_preparation"] == pytest.approx(
+        preparation["mean_over_preparation"]
+    )
+    assert summary["metrics"]["mean_under_preparation"] == pytest.approx(
+        preparation["mean_under_preparation"]
+    )
+    for horizon in (1, 2, 5):
+        row = point_metrics[
+            point_metrics["training_window_id"].eq("TW_EXPANDING")
+            & point_metrics["evaluation_scope"].eq("service_horizon")
+            & point_metrics["scope_value"].astype(str).eq(str(horizon))
+        ].iloc[0]
+        assert summary["horizons"][f"H{horizon}"]["mae"] == pytest.approx(
+            row["mae"]
+        )
+
+
+def test_verified_backtest_summary_rejects_another_active_package() -> None:
+    with pytest.raises(BacktestSummaryError, match="No verified historical backtest"):
+        load_verified_backtest_summary(
+            active_f6_package(predictor("ny_12550_f6_nightly_2026-07-19_v1"))
+        )
+
+
+def test_operational_impact_is_cumulative_across_all_packages() -> None:
+    report = build_operational_impact(360, mixed_rows())
+
+    assert report["attendance_row_count"] == 360
+    assert report["prediction_log_count"] == 14
+    assert report["reconciled_log_count"] == 13
+    assert report["estimated_food_saved_meals"] == pytest.approx(5045.0)
+    assert report["estimated_co2e_reduction_kg"] == pytest.approx(8626.95)
+
+
 def test_latest_outcomes_contain_only_the_active_package() -> None:
     report = build_f6_monitoring_report(predictor(), mixed_rows())
     outcomes = report["latest_outcomes"]
@@ -278,7 +397,7 @@ def test_legacy_training_timestamp_is_not_presented_as_f6_training_time() -> Non
     assert status["latest_successful_at"] is None
     assert status["status"] == "PENDING_FIRST_F6_RETRAIN"
     assert status["message"] == (
-        "Activated from verified candidate; first genuine F6 retraining pending"
+        "Activated from verified candidate; first genuine production retraining pending."
     )
 
 

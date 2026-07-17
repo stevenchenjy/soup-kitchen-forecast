@@ -1,3 +1,5 @@
+from datetime import date
+
 import streamlit as st
 
 from src.auth import (
@@ -24,10 +26,13 @@ from src.config import (
 )
 from src.data_admin import attendance_store_mode, delete_record, load_clean_data, save_clean_data, upsert_record
 from src.f6_monitoring import (
+    BacktestSummaryError,
     F6IntegrityError,
     active_f6_package,
+    build_operational_impact,
     build_f6_monitoring_report,
     f6_training_status,
+    load_verified_backtest_summary,
 )
 from src.location_config import save_locations, list_locations
 from src.model_training_runs import (
@@ -43,7 +48,6 @@ from src.prediction_logs import (
     update_prediction_logs_with_actual,
 )
 from src.predictor import VisitorPredictor, WeatherForecastUnavailableError
-from src.recommendation_ui import recommendation_ui_policy
 
 st.set_page_config(page_title="Multi-Location Forecast Admin", layout="wide")
 
@@ -148,9 +152,9 @@ def render_prediction():
         st.caption(f6_integrity_error or "The active F6 contract is unavailable.")
         return
 
-    ui_policy = recommendation_ui_policy(predictor)
-    st.caption(ui_policy.package_caption)
-    st.caption("Recommendation policy: C0 raw Q80")
+    st.caption(
+        "Recommended meals include a built-in safety margin based on expected attendance."
+    )
     custom_date = st.text_input(
         "Target service date (Sat/Sun, YYYY-MM-DD)", value=""
     )
@@ -163,11 +167,11 @@ def render_prediction():
             pred = predictor.predict_next(
                 target_date=normalized_date, meal_buffer_pct=None
             )
-            st.success(f"F6 recommendation ready for {pred.service_date:%Y-%m-%d}.")
+            st.success(f"Recommendation ready for {pred.service_date:%Y-%m-%d}.")
             c1, c2, c3 = st.columns(3)
             c1.metric("Service date", pred.service_date.strftime("%Y-%m-%d"))
             c2.metric("Expected visitors", f"{pred.predicted_visitors:.1f}")
-            c3.metric("Raw Q80 recommended meals", f"{pred.suggested_meals}")
+            c3.metric("Recommended meals", f"{pred.suggested_meals}")
             try:
                 save_prediction_log(location_id, pred, created_by=user["username"], source_app="admin")
             except Exception:
@@ -185,7 +189,7 @@ def render_prediction():
 
 
 def render_model_monitoring():
-    st.subheader("F6 Model Monitoring")
+    st.subheader("Model Monitoring")
     st.caption(f"Prediction log store: {prediction_log_store_mode()}")
     st.caption(f"Training run store: {model_training_run_store_mode()}")
 
@@ -195,114 +199,182 @@ def render_model_monitoring():
         return
 
     feature_hash = active_package.feature_order_sha256
-    st.markdown("**Active F6 package**")
+    st.markdown("### Active Model")
     p1, p2, p3, p4 = st.columns(4)
     p1.metric("Package ID", active_package.package_id)
-    p2.metric("Schema", f"v{active_package.schema_version}")
-    p3.metric("Feature set", active_package.feature_set_id)
-    p4.metric("Feature count", active_package.feature_count)
+    p2.metric("Schema Version", active_package.schema_version)
+    p3.metric("Feature Set", active_package.feature_set_id)
+    p4.metric("Recommendation Policy", active_package.recommendation_policy_id)
     st.caption(
         f"Feature hash: {feature_hash[:12]}…{feature_hash[-8:]} · "
-        f"Recommendation policy: {active_package.recommendation_policy_id} (raw Q80)"
+        f"{active_package.feature_count} features · raw Q80"
     )
 
-    try:
-        logs = load_prediction_logs(location_id=location_id, limit=5000)
-    except Exception as exc:
-        st.error(f"F6 monitoring data could not be loaded: {exc}")
-        return
-    report = build_f6_monitoring_report(
-        predictor,
-        logs,
-        load_error=model_load_error,
-    )
-    if not report["integrity_ok"]:
-        st.error("F6 integrity error")
-        for message in report["integrity_errors"]:
-            st.caption(message)
-        return
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("F6 predictions", report["prediction_count"])
-    c2.metric("F6 reconciled predictions", report["reconciled_count"])
-    c3.metric("F6 unreconciled predictions", report["unreconciled_count"])
-    c4.metric("F6 review stage", report["stage"])
-
-    metrics = report["metrics"]
-
-    def number(value, suffix=""):
-        return "—" if value is None else f"{value:.2f}{suffix}"
+    def number(value):
+        return "—" if value is None else f"{value:.2f}"
 
     def rate(value):
         return "—" if value is None else f"{value * 100:.1f}%"
 
-    if report["reconciled_count"] == 0:
-        st.info("F6 performance: Insufficient data")
-
-    st.markdown("**F6-only performance**")
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("F6 MAE", number(metrics["mae"]))
-    m2.metric(
-        "F6 median absolute error", number(metrics["median_absolute_error"])
-    )
-    m3.metric("F6 RMSE", number(metrics["rmse"]))
-    m4.metric("F6 mean signed error", number(metrics["mean_signed_error"]))
-    st.caption("Mean signed error is expected visitors minus actual visitors.")
-
-    m5, m6, m7, m8 = st.columns(4)
-    m5.metric("F6 underprediction rate", rate(metrics["underprediction_rate"]))
-    m6.metric("F6 Q80 empirical coverage", rate(metrics["q80_empirical_coverage"]))
-    m7.metric("F6 mean over-preparation", number(metrics["mean_over_preparation"]))
-    m8.metric("F6 mean under-preparation", number(metrics["mean_under_preparation"]))
-
-    s1, s2 = st.columns(2)
-    s1.metric("F6 Saturday MAE", number(report["segments"]["Saturday"]["mae"]))
-    s2.metric("F6 Sunday MAE", number(report["segments"]["Sunday"]["mae"]))
-
-    horizon_rows = []
-    for horizon, values in report["horizons"].items():
-        horizon_rows.append(
-            {
-                "Horizon": horizon,
-                "F6 reconciled predictions": values["reconciled_count"],
-                "F6 MAE": number(values["mae"]),
-                "F6 Q80 coverage": rate(values["q80_empirical_coverage"]),
-            }
+    st.markdown("### Model Performance")
+    try:
+        backtest = load_verified_backtest_summary(active_package)
+    except BacktestSummaryError as exc:
+        backtest = None
+        st.error(f"Verified historical backtest unavailable: {exc}")
+    if backtest is not None:
+        metrics = backtest["metrics"]
+        cutoff = date.fromisoformat(backtest["attendance_cutoff"])
+        st.caption(
+            "Origin-aware historical backtest using attendance through "
+            f"{cutoff.strftime('%B')} {cutoff.day}, {cutoff.year}."
         )
-    st.markdown("**F6 service-horizon metrics**")
-    st.dataframe(horizon_rows, use_container_width=True, hide_index=True)
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("MAE", number(metrics["mae"]))
+        m2.metric("Median Absolute Error", number(metrics["median_absolute_error"]))
+        m3.metric("RMSE", number(metrics["rmse"]))
+        m4.metric("Mean Signed Error", number(metrics["mean_signed_error"]))
+        m5, m6, m7, m8 = st.columns(4)
+        m5.metric("Underprediction Rate", rate(metrics["underprediction_rate"]))
+        m6.metric("Q80 Empirical Coverage", rate(metrics["q80_empirical_coverage"]))
+        m7.metric("Mean Over-Preparation", number(metrics["mean_over_preparation"]))
+        m8.metric("Mean Under-Preparation", number(metrics["mean_under_preparation"]))
+        s1, s2 = st.columns(2)
+        s1.metric("Saturday MAE", number(backtest["segments"]["Saturday"]["mae"]))
+        s2.metric("Sunday MAE", number(backtest["segments"]["Sunday"]["mae"]))
+        h1, h2, h5 = st.columns(3)
+        h1.metric("H1 MAE", number(backtest["horizons"]["H1"]["mae"]))
+        h2.metric("H2 MAE", number(backtest["horizons"]["H2"]["mae"]))
+        h5.metric("H5 MAE", number(backtest["horizons"]["H5"]["mae"]))
 
-    st.markdown("**F6 sustainability estimates**")
-    sustainability = report["sustainability"]
-    w1, w2 = st.columns(2)
-    w1.metric(
-        "F6 estimated waste avoided",
-        f"{sustainability['total_estimated_waste_avoided_meals']:.1f} meals",
+    st.markdown("### Live Performance")
+    try:
+        logs = load_prediction_logs(location_id=location_id, limit=5000)
+    except Exception as exc:
+        logs = None
+        report = None
+        st.error(f"Production monitoring data could not be loaded: {exc}")
+    else:
+        report = build_f6_monitoring_report(
+            predictor,
+            logs,
+            load_error=model_load_error,
+        )
+        if not report["integrity_ok"]:
+            st.error("F6 integrity error")
+            for message in report["integrity_errors"]:
+                st.caption(message)
+            report = None
+
+    if report is not None:
+        stage_labels = {
+            "INSUFFICIENT_DATA": "Insufficient data",
+            "EARLY_SIGNAL": "Early signal",
+            "INITIAL_REVIEW": "Initial review",
+            "STABLE_REVIEW": "Stable review",
+        }
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Production Predictions", report["prediction_count"])
+        c2.metric("Reconciled Predictions", report["reconciled_count"])
+        c3.metric("Unreconciled Predictions", report["unreconciled_count"])
+        c4.metric("Monitoring Stage", stage_labels[report["stage"]])
+
+        live_metrics = report["metrics"]
+        if report["reconciled_count"] <= 3:
+            st.info(
+                "Insufficient production data. Live metrics will appear after actual attendance is recorded."
+            )
+        else:
+            l1, l2, l3, l4 = st.columns(4)
+            l1.metric("Live MAE", number(live_metrics["mae"]))
+            l2.metric("Live RMSE", number(live_metrics["rmse"]))
+            l3.metric("Live Mean Signed Error", number(live_metrics["mean_signed_error"]))
+            l4.metric("Live Underprediction Rate", rate(live_metrics["underprediction_rate"]))
+            l5, l6, l7 = st.columns(3)
+            l5.metric("Live Q80 Coverage", rate(live_metrics["q80_empirical_coverage"]))
+            l6.metric("Live Mean Over-Preparation", number(live_metrics["mean_over_preparation"]))
+            l7.metric("Live Mean Under-Preparation", number(live_metrics["mean_under_preparation"]))
+
+        if report["integrity_alerts"]:
+            st.markdown("**Integrity Alerts**")
+            for message in report["integrity_alerts"]:
+                st.warning(message)
+        if report["reconciled_count"] >= 4 and report["performance_alerts"]:
+            st.markdown("**Performance Alerts**")
+            for message in report["performance_alerts"]:
+                st.warning(message)
+
+        st.markdown("**Latest Production Outcomes**")
+        if not report["latest_outcomes"]:
+            st.info("No active-model production predictions are available yet.")
+        else:
+            outcome_rows = []
+            for row in report["latest_outcomes"]:
+                predicted = row.get("predicted_visitors")
+                actual = row.get("actual_visitors")
+                absolute_error = None
+                if predicted is not None and actual is not None:
+                    absolute_error = abs(float(predicted) - float(actual))
+                outcome_rows.append(
+                    {
+                        "Service date": row.get("service_date"),
+                        "Segment": str(row.get("model_segment") or "").upper(),
+                        "Horizon": row.get("service_horizon"),
+                        "Expected visitors": (
+                            None if predicted is None else round(float(predicted), 2)
+                        ),
+                        "Raw Q80": (
+                            None
+                            if row.get("predicted_quantile") is None
+                            else round(float(row["predicted_quantile"]), 2)
+                        ),
+                        "Recommended meals": row.get("suggested_meals"),
+                        "Actual visitors": actual,
+                        "Absolute error": (
+                            None if absolute_error is None else round(absolute_error, 2)
+                        ),
+                    }
+                )
+            st.dataframe(outcome_rows, use_container_width=True, hide_index=True)
+
+    st.markdown("### Operational Impact")
+    try:
+        attendance_rows = len(load_clean_data(location_id))
+    except Exception as exc:
+        attendance_rows = None
+        st.warning(f"Attendance total could not be loaded: {exc}")
+    if logs is None:
+        impact = None
+    else:
+        impact = build_operational_impact(attendance_rows, logs)
+    o1, o2, o3 = st.columns(3)
+    o1.metric(
+        "Attendance Rows",
+        "—" if attendance_rows is None else attendance_rows,
     )
-    w2.metric(
-        "F6 estimated CO2e reduction",
-        f"{sustainability['total_estimated_co2e_reduction_kg']:.1f} kg",
+    o2.metric(
+        "Total Prediction Logs",
+        "—" if impact is None else impact["prediction_log_count"],
+    )
+    o3.metric(
+        "Logs Reconciled with Actuals",
+        "—" if impact is None else impact["reconciled_log_count"],
+    )
+    o4, o5 = st.columns(2)
+    o4.metric(
+        "Estimated Food Saved",
+        "—" if impact is None else f"{impact['estimated_food_saved_meals']:.1f} meals",
+    )
+    o5.metric(
+        "Estimated CO₂e Reduction",
+        "—" if impact is None else f"{impact['estimated_co2e_reduction_kg']:.1f} kg",
     )
     st.caption(
-        f"These F6-only estimates use a {ESTIMATED_WASTE_REDUCTION_RATE:.0%} "
-        "meal-waste reduction assumption; they are not verified waste measurements."
+        f"Cumulative operational estimates across project records using a "
+        f"{ESTIMATED_WASTE_REDUCTION_RATE:.0%} meal-waste reduction assumption."
     )
 
-    st.markdown("**F6 integrity alerts**")
-    if report["integrity_alerts"]:
-        for message in report["integrity_alerts"]:
-            st.warning(message)
-    else:
-        st.success("No F6 integrity alerts.")
-
-    st.markdown("**F6 performance alerts**")
-    if report["performance_alerts"]:
-        for message in report["performance_alerts"]:
-            st.warning(message)
-    else:
-        st.success("No F6 performance alerts.")
-
-    st.markdown("**F6 training status**")
+    st.markdown("### Training Status")
     try:
         retrain_state = get_retrain_state(location_id)
         latest_run = latest_training_run(location_id)
@@ -315,48 +387,20 @@ def render_model_monitoring():
         )
     except Exception as exc:
         training = None
-        st.warning(f"F6 training status could not be loaded: {exc}")
+        st.warning(f"Training status could not be loaded: {exc}")
     if training is not None:
         t1, t2, t3, t4 = st.columns(4)
-        t1.metric("F6 retraining status", training["status"])
-        t2.metric("Needs F6 retraining", "Yes" if training["needs_retraining"] else "No")
+        t1.metric("Needs Retraining", "Yes" if training["needs_retraining"] else "No")
+        t2.metric(
+            "Last Attendance Update",
+            (retrain_state or {}).get("last_attendance_updated_at") or "—",
+        )
         t3.metric(
-            "Latest successful F6 training",
+            "Last Successful Training",
             training["latest_successful_at"] or "—",
         )
-        t4.metric("F6 training attendance rows", training["attendance_rows"] or "—")
+        t4.metric("Retraining Status", training["status"])
         st.info(training["message"])
-
-    st.markdown("**Latest F6 prediction outcomes**")
-    if not report["latest_outcomes"]:
-        st.info("No active-package F6 predictions are available yet.")
-        return
-    outcome_rows = []
-    for row in report["latest_outcomes"]:
-        predicted = row.get("predicted_visitors")
-        actual = row.get("actual_visitors")
-        absolute_error = None
-        if predicted is not None and actual is not None:
-            absolute_error = abs(float(predicted) - float(actual))
-        outcome_rows.append(
-            {
-                "Service date": row.get("service_date"),
-                "Segment": str(row.get("model_segment") or "").upper(),
-                "Horizon": row.get("service_horizon"),
-                "Expected visitors": None if predicted is None else round(float(predicted), 2),
-                "Raw Q80": (
-                    None
-                    if row.get("predicted_quantile") is None
-                    else round(float(row["predicted_quantile"]), 2)
-                ),
-                "Recommended meals": row.get("suggested_meals"),
-                "Actual visitors": actual,
-                "Absolute error": (
-                    None if absolute_error is None else round(absolute_error, 2)
-                ),
-            }
-        )
-    st.dataframe(outcome_rows, use_container_width=True, hide_index=True)
 
 
 
@@ -444,10 +488,10 @@ def render_data_ops():
             st.success("Saved")
             st.rerun()
 
-        st.markdown("#### F6 Retraining")
+        st.markdown("#### Production Retraining")
         st.caption(
-            "F6 retraining uses the guarded publication workflow. Current status is "
-            "shown in F6 Model Monitoring."
+            "Retraining uses the guarded publication workflow. Current status is "
+            "shown in Model Monitoring."
         )
 
 
@@ -830,7 +874,7 @@ def render_location_management():
 t1, t2, t3, t4, t5, t6 = st.tabs(
     [
         "Prediction",
-        "F6 Model Monitoring",
+        "Model Monitoring",
         "Data Management",
         "Staff Access",
         "Location Management",

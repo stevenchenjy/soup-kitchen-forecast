@@ -1,0 +1,70 @@
+{
+  "summary_schema_version": 1,
+  "verification_status": "verified",
+  "package_id": "ny_12550_f6_2026-07-12_v1",
+  "model_package_schema_version": 2,
+  "feature_set_id": "F6_COMPACT_SELECTED",
+  "feature_order_sha256": "dac868ae1a739cbee55443a953c6ab5c45876e158e40b57300ffe1c9607f7419",
+  "recommendation_policy_id": "C0_EXISTING_RAW_QUANTILE",
+  "attendance_cutoff": "2026-07-12",
+  "evaluation": {
+    "design": "origin_aware",
+    "primary_scope": "S3_next_service",
+    "training_window_id": "TW_EXPANDING",
+    "sample_weight_id": "SW_UNIFORM",
+    "weekday_policy": "T1_valid_weekends",
+    "weather_policy": "W0_no_weather",
+    "row_count": 322
+  },
+  "metrics": {
+    "mae": 13.62696513246822,
+    "median_absolute_error": 10.253146148989984,
+    "rmse": 17.738338356170434,
+    "mean_signed_error": 0.22609781014812802,
+    "underprediction_rate": 0.577639751552795,
+    "q80_empirical_coverage": 0.6832298136645962,
+    "mean_over_preparation": 12.341614906832298,
+    "mean_under_preparation": 3.1335403726708075
+  },
+  "segments": {
+    "Saturday": {
+      "row_count": 163,
+      "mae": 13.622258066963107
+    },
+    "Sunday": {
+      "row_count": 159,
+      "mae": 13.631790614715598
+    }
+  },
+  "horizons": {
+    "H1": {
+      "row_count": 485,
+      "mae": 13.612895542207069
+    },
+    "H2": {
+      "row_count": 481,
+      "mae": 13.632493365962487
+    },
+    "H5": {
+      "row_count": 318,
+      "mae": 14.21230873930077
+    }
+  },
+  "source_artifacts": [
+    {
+      "path": "models/candidates/ny_12550_f6_2026-07-12_v1/metadata.json",
+      "sha256": "c5bdfb1396919342d2736ab1579dd3de7fc5f88c4619da7c4afacda2529b9854",
+      "provides": "package contract and overall, Saturday, and Sunday point metrics"
+    },
+    {
+      "path": "artifacts/ny_12550/model_optimization/phase2b1_training_windows/06_training_window_metrics.csv",
+      "sha256": "a5652569f0e3d05be2e6ef235230cb46fcc1e773f5909e318ec7c8967dbed630",
+      "provides": "origin-aware point, quantile, and service-horizon metrics"
+    },
+    {
+      "path": "artifacts/ny_12550/model_optimization/phase2c_lite_calibration/10_daytype_scenario_horizon.csv",
+      "sha256": "f224054790e639cfd629d0e70e75cf43a30a344e801bdc3982536bc8b419bf36",
+      "provides": "C0 raw-Q80 operational preparation metrics"
+    }
+  ]
+}

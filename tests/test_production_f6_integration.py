@@ -34,7 +34,8 @@ from src.production_features import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ACTIVE_MODEL_SHA256 = "ee56a3fb03c212653a97f6073600189a51592db355efabe09ef2b138f36976f0"
+ACTIVE_MODEL_SHA256 = "9eb8c75271c301f3f44ac864705c23a779c0a9f3fadedcfe896d5dea350e3397"
+LEGACY_BACKUP_SHA256 = "ee56a3fb03c212653a97f6073600189a51592db355efabe09ef2b138f36976f0"
 FALLBACK_MODEL_SHA256 = "cca9b22d63d85ff0a4f0ebd14e09209d1dfffa73f0f63e93d9117d93b75bd920"
 
 
@@ -189,7 +190,9 @@ def test_unknown_schema_version_fails_clearly(tmp_path: Path) -> None:
 
 
 def test_existing_schema_v1_package_remains_loadable_and_legacy() -> None:
-    active_path = ROOT / "models/visitor_model_ny_12550.joblib"
+    active_path = (
+        ROOT / "models/backups/ny_12550_schema1_pre_f6_2026-07-16.joblib"
+    )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         predictor = VisitorPredictor(str(active_path))
@@ -197,6 +200,7 @@ def test_existing_schema_v1_package_remains_loadable_and_legacy() -> None:
     assert predictor.package_id == active_path.name
     assert predictor.uses_locked_f6 is False
     assert predictor.recommendation_policy_id == "LEGACY_MAX_OF_POINT_QUANTILE_AND_BUFFERS"
+    assert sha256(active_path) == LEGACY_BACKUP_SHA256
 
 
 def test_candidate_destination_refuses_active_models_directory(tmp_path: Path) -> None:
@@ -379,6 +383,9 @@ def test_legacy_trainer_remains_schema_v1_for_unmigrated_locations() -> None:
 
 def test_tracked_active_models_and_source_data_remain_unchanged() -> None:
     assert sha256(ROOT / "models/visitor_model_ny_12550.joblib") == ACTIVE_MODEL_SHA256
+    assert sha256(
+        ROOT / "models/backups/ny_12550_schema1_pre_f6_2026-07-16.joblib"
+    ) == LEGACY_BACKUP_SHA256
     assert sha256(ROOT / "models/visitor_model.joblib") == FALLBACK_MODEL_SHA256
     assert sha256(ROOT / "data/locations/ny_12550/attendance.db") == (
         "d4b0df65bebac69fe3069199cc71d062c2eea956102aafaf66425c1ce8a30d9d"

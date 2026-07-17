@@ -26,6 +26,9 @@ CANDIDATE_PACKAGE = (
     / "models/candidates/ny_12550_f6_2026-07-12_v1/model_package.joblib"
 )
 ACTIVE_MODEL = ROOT / "models/visitor_model_ny_12550.joblib"
+LEGACY_BACKUP = (
+    ROOT / "models/backups/ny_12550_schema1_pre_f6_2026-07-16.joblib"
+)
 LOCATION = Location(
     id="ny_12550",
     name="Newburgh, NY 12550",
@@ -348,7 +351,7 @@ def _run_prediction_ui(
 
 @pytest.mark.parametrize("app_filename,role", [("app.py", "master"), ("app_staff.py", "staff")])
 @pytest.mark.parametrize("target_date,segment", [("2026-07-18", "sat"), ("2026-07-19", "sun")])
-def test_f6_candidate_admin_and_staff_prediction_paths(
+def test_active_f6_admin_and_staff_prediction_paths(
     app_filename: str,
     role: str,
     target_date: str,
@@ -357,7 +360,7 @@ def test_f6_candidate_admin_and_staff_prediction_paths(
     result = _run_prediction_ui(
         app_filename=app_filename,
         role=role,
-        model_path=CANDIDATE_PACKAGE,
+        model_path=ACTIVE_MODEL,
         target_date=target_date,
         f6=True,
     )
@@ -387,7 +390,7 @@ def test_legacy_admin_and_staff_prediction_paths_remain_compatible(
     result = _run_prediction_ui(
         app_filename=app_filename,
         role=role,
-        model_path=ACTIVE_MODEL,
+        model_path=LEGACY_BACKUP,
         target_date="2026-07-18",
         f6=False,
     )

@@ -1,0 +1,33 @@
+{
+  "backup_path": "/Users/messssi/Documents/GitHub/soup-kitchen-forecast/models/backups/ny_12550_schema1_pre_f6_2026-07-16.joblib",
+  "backup_sha256": "ee56a3fb03c212653a97f6073600189a51592db355efabe09ef2b138f36976f0",
+  "creation_timestamp_utc": "2026-07-17T02:18:42.834112+00:00",
+  "feature_count": 26,
+  "fresh_process_validation": {
+    "load_warning_count": 10942,
+    "smoke_predictions": [
+      {
+        "meal_buffer_pct": 0.08,
+        "model_segment": "sat",
+        "predicted_quantile": 134.92119622896305,
+        "predicted_visitors": 120.0121807659572,
+        "residual_buffer": 12.1879110199484,
+        "service_date": "2026-07-18",
+        "suggested_meals": 135
+      }
+    ],
+    "validation": {
+      "feature_count": 26,
+      "package_id": "ny_12550_schema1_pre_f6_2026-07-16.joblib",
+      "path": "/Users/messssi/Documents/GitHub/soup-kitchen-forecast/models/backups/ny_12550_schema1_pre_f6_2026-07-16.joblib",
+      "recommendation_policy_id": "LEGACY_MAX_OF_POINT_QUANTILE_AND_BUFFERS",
+      "schema_version": 1,
+      "sha256": "ee56a3fb03c212653a97f6073600189a51592db355efabe09ef2b138f36976f0"
+    }
+  },
+  "git_commit": "1d4c2f3933d452e8c6dcbf1826fb8fc0c652797c",
+  "rollback_target": "/Users/messssi/Documents/GitHub/soup-kitchen-forecast/models/visitor_model_ny_12550.joblib",
+  "schema_version": 1,
+  "source_path": "/Users/messssi/Documents/GitHub/soup-kitchen-forecast/models/visitor_model_ny_12550.joblib",
+  "source_sha256": "ee56a3fb03c212653a97f6073600189a51592db355efabe09ef2b138f36976f0"
+}

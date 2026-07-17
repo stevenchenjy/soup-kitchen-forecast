@@ -25,7 +25,9 @@ CANDIDATE = (
 )
 CANDIDATE_SHA256 = "9eb8c75271c301f3f44ac864705c23a779c0a9f3fadedcfe896d5dea350e3397"
 PACKAGE_ID = "ny_12550_f6_2026-07-12_v1"
-LEGACY_ACTIVE = ROOT / "models/visitor_model_ny_12550.joblib"
+LEGACY_ACTIVE = (
+    ROOT / "models/backups/ny_12550_schema1_pre_f6_2026-07-16.joblib"
+)
 LEGACY_SHA256 = "ee56a3fb03c212653a97f6073600189a51592db355efabe09ef2b138f36976f0"
 pytestmark = pytest.mark.filterwarnings(
     "ignore:Setting the shape on a NumPy array has been deprecated:DeprecationWarning"

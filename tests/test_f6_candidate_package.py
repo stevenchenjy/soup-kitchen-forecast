@@ -22,7 +22,7 @@ EXPECTED_CANDIDATE_SHA256 = (
     "9eb8c75271c301f3f44ac864705c23a779c0a9f3fadedcfe896d5dea350e3397"
 )
 EXPECTED_ACTIVE_SHA256 = (
-    "ee56a3fb03c212653a97f6073600189a51592db355efabe09ef2b138f36976f0"
+    "9eb8c75271c301f3f44ac864705c23a779c0a9f3fadedcfe896d5dea350e3397"
 )
 EXPECTED_FALLBACK_SHA256 = (
     "cca9b22d63d85ff0a4f0ebd14e09209d1dfffa73f0f63e93d9117d93b75bd920"
@@ -140,7 +140,7 @@ def test_versioned_f6_candidate_loads_with_locked_contract_and_models() -> None:
     assert predictor.uses_locked_f6 is True
 
 
-def test_versioned_candidate_did_not_change_active_models() -> None:
+def test_versioned_candidate_is_the_exact_active_model_and_fallback_is_unchanged() -> None:
     assert sha256(ROOT / "models/visitor_model_ny_12550.joblib") == (
         EXPECTED_ACTIVE_SHA256
     )

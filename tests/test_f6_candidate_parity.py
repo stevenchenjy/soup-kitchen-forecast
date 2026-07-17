@@ -35,7 +35,7 @@ CANDIDATE_DIR = ROOT / "models/candidates/ny_12550_f6_2026-07-12_v1"
 CANDIDATE_PACKAGE = CANDIDATE_DIR / "model_package.joblib"
 ACTIVE_MODEL = ROOT / "models/visitor_model_ny_12550.joblib"
 ACTIVE_MODEL_SHA256 = (
-    "ee56a3fb03c212653a97f6073600189a51592db355efabe09ef2b138f36976f0"
+    "9eb8c75271c301f3f44ac864705c23a779c0a9f3fadedcfe896d5dea350e3397"
 )
 VALID_CASES = tuple(case for case in parity_case_registry() if case.valid)
 CASE_BY_ID = {case.case_id: case for case in parity_case_registry()}
@@ -486,7 +486,7 @@ def test_non_finite_transformed_features_fail_before_model_prediction(
             predictor.predict_next("2026-07-18")
 
 
-def test_candidate_remains_inactive_and_active_model_is_unchanged() -> None:
+def test_candidate_artifact_metadata_is_unchanged_and_active_is_exact_candidate() -> None:
     metadata = json.loads((CANDIDATE_DIR / "metadata.json").read_text())
     assert metadata["package_status"] == "candidate_not_active"
     assert metadata["activation"] == {
@@ -495,5 +495,6 @@ def test_candidate_remains_inactive_and_active_model_is_unchanged() -> None:
     }
     assert sha256(ACTIVE_MODEL) == ACTIVE_MODEL_SHA256
     active = VisitorPredictor(str(ACTIVE_MODEL))
-    assert active.model_package_schema_version == 1
-    assert active.uses_locked_f6 is False
+    assert active.model_package_schema_version == 2
+    assert active.package_id == "ny_12550_f6_2026-07-12_v1"
+    assert active.uses_locked_f6 is True

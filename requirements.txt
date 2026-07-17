@@ -1,5 +1,5 @@
 pandas>=2.0.0
-numpy>=1.24.0
+numpy==2.5.1
 scikit-learn==1.5.2
 matplotlib>=3.8.0
 joblib==1.4.2

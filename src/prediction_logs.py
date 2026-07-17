@@ -6,6 +6,7 @@ import os
 import sqlite3
 from datetime import datetime, timezone
 from typing import Any
+from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -39,6 +40,14 @@ CREATE TABLE IF NOT EXISTS prediction_logs (
     suggested_meals INTEGER NOT NULL,
     meal_buffer_pct REAL,
     model_segment TEXT,
+    package_id TEXT,
+    model_package_schema_version INTEGER,
+    feature_set_id TEXT,
+    feature_order_sha256 TEXT,
+    recommendation_policy_id TEXT,
+    forecast_origin TEXT,
+    calendar_days_ahead INTEGER,
+    service_horizon INTEGER,
     actual_visitors INTEGER,
     absolute_error REAL,
     baseline_meals_prepared INTEGER,
@@ -52,6 +61,17 @@ CREATE TABLE IF NOT EXISTS prediction_logs (
 CREATE INDEX IF NOT EXISTS idx_prediction_logs_location_id ON prediction_logs(location_id);
 CREATE INDEX IF NOT EXISTS idx_prediction_logs_service_date ON prediction_logs(service_date);
 """
+
+PROVENANCE_COLUMN_TYPES = {
+    "package_id": "TEXT",
+    "model_package_schema_version": "INTEGER",
+    "feature_set_id": "TEXT",
+    "feature_order_sha256": "TEXT",
+    "recommendation_policy_id": "TEXT",
+    "forecast_origin": "TEXT",
+    "calendar_days_ahead": "INTEGER",
+    "service_horizon": "INTEGER",
+}
 
 
 def _now() -> str:
@@ -149,9 +169,68 @@ def _supabase_request(
         url = f"{url}?{urlencode(params)}"
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
     request = Request(url, data=data, headers=_supabase_headers(extra_headers), method=method)
-    with urlopen(request, timeout=10) as response:
-        body = response.read().decode("utf-8")
+    try:
+        with urlopen(request, timeout=10) as response:
+            body = response.read().decode("utf-8")
+    except HTTPError as exc:
+        error_body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"Supabase request failed ({exc.code}): {error_body}"
+        ) from exc
     return json.loads(body) if body else None
+
+
+def _without_provenance(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in payload.items()
+        if key not in PROVENANCE_COLUMN_TYPES
+    }
+
+
+def _is_missing_provenance_schema_error(exc: Exception) -> bool:
+    message = str(exc).casefold()
+    return "schema cache" in message or (
+        "column" in message
+        and any(column.casefold() in message for column in PROVENANCE_COLUMN_TYPES)
+    )
+
+
+def _supabase_write_with_provenance_fallback(
+    method: str,
+    *,
+    params: dict[str, str] | None,
+    payload: dict[str, Any],
+    extra_headers: dict[str, str] | None,
+) -> Any:
+    try:
+        return _supabase_request(
+            method,
+            params=params,
+            payload=payload,
+            extra_headers=extra_headers,
+        )
+    except RuntimeError as exc:
+        if not _is_missing_provenance_schema_error(exc):
+            raise
+        return _supabase_request(
+            method,
+            params=params,
+            payload=_without_provenance(payload),
+            extra_headers=extra_headers,
+        )
+
+
+def _ensure_prediction_log_provenance_columns(conn: sqlite3.Connection) -> None:
+    existing = {
+        str(row["name"])
+        for row in conn.execute("PRAGMA table_info(prediction_logs)").fetchall()
+    }
+    for column, sqlite_type in PROVENANCE_COLUMN_TYPES.items():
+        if column not in existing:
+            conn.execute(
+                f"ALTER TABLE prediction_logs ADD COLUMN {column} {sqlite_type}"
+            )
 
 
 def _connect(location_id: str) -> sqlite3.Connection:
@@ -160,6 +239,7 @@ def _connect(location_id: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA_SQL)
+    _ensure_prediction_log_provenance_columns(conn)
     _dedupe_prediction_logs_sqlite(conn)
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_prediction_logs_location_service_unique "
@@ -235,6 +315,26 @@ def _row_from_prediction(
         "suggested_meals": suggested_meals,
         "meal_buffer_pct": float(prediction_output.meal_buffer_pct),
         "model_segment": str(prediction_output.model_segment),
+        "package_id": getattr(prediction_output, "package_id", None),
+        "model_package_schema_version": getattr(
+            prediction_output, "model_package_schema_version", None
+        ),
+        "feature_set_id": getattr(prediction_output, "feature_set_id", None),
+        "feature_order_sha256": getattr(
+            prediction_output, "feature_order_sha256", None
+        ),
+        "recommendation_policy_id": getattr(
+            prediction_output, "recommendation_policy_id", None
+        ),
+        "forecast_origin": (
+            _service_date(prediction_output.forecast_origin)
+            if getattr(prediction_output, "forecast_origin", None) is not None
+            else None
+        ),
+        "calendar_days_ahead": getattr(
+            prediction_output, "calendar_days_ahead", None
+        ),
+        "service_horizon": getattr(prediction_output, "service_horizon", None),
         "actual_visitors": None,
         "absolute_error": None,
         "baseline_meals_prepared": baseline,
@@ -273,7 +373,7 @@ def save_prediction_log(
             if keep.get("created_at"):
                 row["created_at"] = keep["created_at"]
             _recalculate_absolute_error(row)
-            _supabase_request(
+            _supabase_write_with_provenance_fallback(
                 "PATCH",
                 params={"id": f"eq.{keep['id']}"},
                 payload=row,
@@ -287,7 +387,7 @@ def save_prediction_log(
                 )
             return keep.get("id")
 
-        result = _supabase_request(
+        result = _supabase_write_with_provenance_fallback(
             "POST",
             params={"on_conflict": "location_id,service_date"},
             payload=row,

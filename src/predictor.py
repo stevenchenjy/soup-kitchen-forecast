@@ -15,6 +15,7 @@ from src.production_features import (
     MODEL_PACKAGE_SCHEMA_VERSION,
     RECOMMENDATION_POLICY_ID,
     build_locked_f6_feature_row,
+    service_horizon_between,
     validate_package_feature_contract,
 )
 from src.weather import WeatherClient
@@ -29,6 +30,14 @@ class PredictionOutput:
     suggested_meals: int
     meal_buffer_pct: float
     model_segment: str
+    package_id: str | None = None
+    model_package_schema_version: int | None = None
+    feature_set_id: str | None = None
+    feature_order_sha256: str | None = None
+    recommendation_policy_id: str | None = None
+    forecast_origin: pd.Timestamp | None = None
+    calendar_days_ahead: int | None = None
+    service_horizon: int | None = None
 
 
 class WeatherForecastUnavailableError(RuntimeError):
@@ -181,6 +190,10 @@ class VisitorPredictor:
             requested_date = infer_next_service_date(self.history_df[DATE_COL])
 
         dt = pd.Timestamp(validate_forecast_target_date(requested_date, timezone=self.weather_timezone))
+        today = pd.Timestamp(config.forecast_today(self.weather_timezone)).normalize()
+        forecast_origin = min(today, dt.normalize() - pd.Timedelta(days=1))
+        calendar_days_ahead = int((dt.normalize() - forecast_origin).days)
+        service_horizon = service_horizon_between(forecast_origin, dt)
         segment = self._segment_for_date(dt)
         if segment not in self.models:
             raise ValueError(f"No trained model for segment: {segment}")
@@ -222,4 +235,26 @@ class VisitorPredictor:
             suggested_meals=int(np.ceil(suggested)),
             meal_buffer_pct=buffer_pct,
             model_segment=segment,
+            package_id=getattr(self, "package_id", None),
+            model_package_schema_version=getattr(
+                self, "model_package_schema_version", None
+            ),
+            feature_set_id=(
+                self.feature_contract.get("feature_set_id")
+                if isinstance(getattr(self, "feature_contract", None), dict)
+                else None
+            ),
+            feature_order_sha256=(
+                self.feature_contract.get("feature_order_sha256")
+                if isinstance(getattr(self, "feature_contract", None), dict)
+                else None
+            ),
+            recommendation_policy_id=getattr(
+                self,
+                "recommendation_policy_id",
+                "LEGACY_MAX_OF_POINT_QUANTILE_AND_BUFFERS",
+            ),
+            forecast_origin=forecast_origin,
+            calendar_days_ahead=calendar_days_ahead,
+            service_horizon=service_horizon,
         )

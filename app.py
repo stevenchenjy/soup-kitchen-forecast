@@ -1,8 +1,3 @@
-import json
-import subprocess
-import sys
-from pathlib import Path
-
 import streamlit as st
 
 from src.auth import (
@@ -24,11 +19,16 @@ from src.config import (
     ForecastHorizonError,
     ForecastTargetDateError,
     ServiceDateParseError,
-    artifact_dir_for_location,
     model_file_for_location,
     parse_service_date,
 )
 from src.data_admin import attendance_store_mode, delete_record, load_clean_data, save_clean_data, upsert_record
+from src.f6_monitoring import (
+    F6IntegrityError,
+    active_f6_package,
+    build_f6_monitoring_report,
+    f6_training_status,
+)
 from src.location_config import save_locations, list_locations
 from src.model_training_runs import (
     get_retrain_state,
@@ -37,17 +37,13 @@ from src.model_training_runs import (
     model_training_run_store_mode,
 )
 from src.prediction_logs import (
-    cleanup_logs_without_attendance,
     load_prediction_logs,
     prediction_log_store_mode,
     save_prediction_log,
-    summarize_monitoring,
     update_prediction_logs_with_actual,
 )
 from src.predictor import VisitorPredictor, WeatherForecastUnavailableError
 from src.recommendation_ui import recommendation_ui_policy
-
-ROOT = Path(__file__).resolve().parent
 
 st.set_page_config(page_title="Multi-Location Forecast Admin", layout="wide")
 
@@ -105,7 +101,7 @@ st.title("Multi-Location Forecast Admin")
 st.caption("Each location has independent database, model artifacts, and prediction outputs")
 if user_store_mode() == "local_json":
     st.warning(
-        "User accounts are using local data/users.json fallback. On Streamlit Cloud this is not shared between "
+        "User accounts are using local data/users.json storage. On Streamlit Cloud this is not shared between "
         "separate admin and staff apps, so configure Supabase secrets before managing production accounts."
     )
 
@@ -125,7 +121,6 @@ if sidebar.button("Logout"):
     st.rerun()
 
 model_path = model_file_for_location(location_id)
-artifact_dir = artifact_dir_for_location(location_id)
 predictor = None
 model_load_error = None
 if model_path.exists():
@@ -134,59 +129,45 @@ if model_path.exists():
     except Exception as exc:
         model_load_error = exc
 
+active_package = None
+f6_integrity_error = None
+if predictor is not None:
+    try:
+        active_package = active_f6_package(predictor)
+    except F6IntegrityError as exc:
+        f6_integrity_error = str(exc)
+else:
+    f6_integrity_error = "The active F6 model could not be loaded."
+
 
 
 def render_prediction():
     st.subheader(f"Prediction - {selected_name}")
-    if predictor is None:
-        if model_path.exists() and model_load_error is not None:
-            st.warning("Model file is incompatible. Please retrain model.")
-            st.caption(f"Load error: {model_load_error}")
-        else:
-            st.warning(f"Model not found for location '{location_id}'. Train this location first.")
-        if st.button("Train this location", type="primary"):
-            with st.spinner("Training..."):
-                r = subprocess.run(
-                    [sys.executable, str(ROOT / "scripts" / "train_backtest.py"), "--location", location_id],
-                    cwd=ROOT,
-                )
-            if r.returncode == 0:
-                st.success("Training completed")
-                st.rerun()
-            else:
-                st.error("Training failed")
+    if active_package is None:
+        st.error("F6 integrity error")
+        st.caption(f6_integrity_error or "The active F6 contract is unavailable.")
         return
 
     ui_policy = recommendation_ui_policy(predictor)
     st.caption(ui_policy.package_caption)
-    if ui_policy.show_percentage_buffer:
-        c1, c2 = st.columns(2)
-        with c1:
-            buffer_pct = st.slider(
-                "Base meal buffer (%)", min_value=0, max_value=30, value=8, step=1
-            )
-        with c2:
-            custom_date = st.text_input("Target service date (Sat/Sun, YYYY-MM-DD)", value="")
-    else:
-        buffer_pct = None
-        st.caption("F6/C0 uses the raw 80th-percentile recommendation without a percentage buffer.")
-        custom_date = st.text_input("Target service date (Sat/Sun, YYYY-MM-DD)", value="")
+    st.caption("Recommendation policy: C0 raw Q80")
+    custom_date = st.text_input(
+        "Target service date (Sat/Sun, YYYY-MM-DD)", value=""
+    )
 
     if st.button("Generate prediction", type="primary"):
         try:
             normalized_date = parse_service_date(custom_date) if custom_date else None
             if normalized_date is not None and normalized_date.isoformat() != custom_date.strip():
                 st.info(f"Using service date: {normalized_date.isoformat()}")
-            meal_buffer_pct = buffer_pct / 100.0 if buffer_pct is not None else None
             pred = predictor.predict_next(
-                target_date=normalized_date, meal_buffer_pct=meal_buffer_pct
+                target_date=normalized_date, meal_buffer_pct=None
             )
-            st.success(
-                f"Location: {location_id} | Service Date: {pred.service_date:%Y-%m-%d} | "
-                f"Segment: {pred.model_segment.upper()} | Point: {pred.predicted_visitors:.1f} | "
-                f"Quantile: {pred.predicted_quantile:.1f} | Residual Buffer: +{pred.residual_buffer:.1f} | "
-                f"{ui_policy.recommendation_label}: {pred.suggested_meals}"
-            )
+            st.success(f"F6 recommendation ready for {pred.service_date:%Y-%m-%d}.")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Service date", pred.service_date.strftime("%Y-%m-%d"))
+            c2.metric("Expected visitors", f"{pred.predicted_visitors:.1f}")
+            c3.metric("Raw Q80 recommended meals", f"{pred.suggested_meals}")
             try:
                 save_prediction_log(location_id, pred, created_by=user["username"], source_app="admin")
             except Exception:
@@ -203,129 +184,179 @@ def render_prediction():
             st.error(f"Prediction failed: {e}")
 
 
-
-def render_metrics():
-    st.subheader(f"Backtest Metrics - {selected_name}")
-    metrics_path = artifact_dir / "metrics.json"
-    if not metrics_path.exists():
-        st.info("No metrics available yet.")
-        return
-    metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
-
-    for key, title in [("overall", "Overall"), ("sat", "Saturday"), ("sun", "Sunday")]:
-        m = metrics.get(key, {})
-        st.markdown(f"**{title}**")
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("MAE", f"{m.get('MAE', 0):.2f}")
-        c2.metric("RMSE", f"{m.get('RMSE', 0):.2f}")
-        c3.metric("MAPE", f"{m.get('MAPE', 0) * 100:.2f}%")
-        c4.metric("P90AbsError", f"{m.get('P90AbsError', 0):.2f}")
-
-    img1 = artifact_dir / "backtest_actual_vs_pred.png"
-    img2 = artifact_dir / "backtest_abs_error.png"
-    if img1.exists() and img2.exists():
-        st.image([str(img1), str(img2)], caption=["Actual vs Pred/PredQ", "Absolute Error"])
-
-
 def render_model_monitoring():
-    st.subheader("Model Monitoring")
-    scope = st.radio("Scope", options=["Selected location", "All locations"], horizontal=True)
-    monitor_location_id = location_id if scope == "Selected location" else None
+    st.subheader("F6 Model Monitoring")
     st.caption(f"Prediction log store: {prediction_log_store_mode()}")
-
-    st.markdown("**Training status**")
     st.caption(f"Training run store: {model_training_run_store_mode()}")
+
+    if active_package is None:
+        st.error("F6 integrity error")
+        st.caption(f6_integrity_error or "The active F6 contract is unavailable.")
+        return
+
+    feature_hash = active_package.feature_order_sha256
+    st.markdown("**Active F6 package**")
+    p1, p2, p3, p4 = st.columns(4)
+    p1.metric("Package ID", active_package.package_id)
+    p2.metric("Schema", f"v{active_package.schema_version}")
+    p3.metric("Feature set", active_package.feature_set_id)
+    p4.metric("Feature count", active_package.feature_count)
+    st.caption(
+        f"Feature hash: {feature_hash[:12]}…{feature_hash[-8:]} · "
+        f"Recommendation policy: {active_package.recommendation_policy_id} (raw Q80)"
+    )
+
+    try:
+        logs = load_prediction_logs(location_id=location_id, limit=5000)
+    except Exception as exc:
+        st.error(f"F6 monitoring data could not be loaded: {exc}")
+        return
+    report = build_f6_monitoring_report(
+        predictor,
+        logs,
+        load_error=model_load_error,
+    )
+    if not report["integrity_ok"]:
+        st.error("F6 integrity error")
+        for message in report["integrity_errors"]:
+            st.caption(message)
+        return
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("F6 predictions", report["prediction_count"])
+    c2.metric("F6 reconciled predictions", report["reconciled_count"])
+    c3.metric("F6 unreconciled predictions", report["unreconciled_count"])
+    c4.metric("F6 review stage", report["stage"])
+
+    metrics = report["metrics"]
+
+    def number(value, suffix=""):
+        return "—" if value is None else f"{value:.2f}{suffix}"
+
+    def rate(value):
+        return "—" if value is None else f"{value * 100:.1f}%"
+
+    if report["reconciled_count"] == 0:
+        st.info("F6 performance: Insufficient data")
+
+    st.markdown("**F6-only performance**")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("F6 MAE", number(metrics["mae"]))
+    m2.metric(
+        "F6 median absolute error", number(metrics["median_absolute_error"])
+    )
+    m3.metric("F6 RMSE", number(metrics["rmse"]))
+    m4.metric("F6 mean signed error", number(metrics["mean_signed_error"]))
+    st.caption("Mean signed error is expected visitors minus actual visitors.")
+
+    m5, m6, m7, m8 = st.columns(4)
+    m5.metric("F6 underprediction rate", rate(metrics["underprediction_rate"]))
+    m6.metric("F6 Q80 empirical coverage", rate(metrics["q80_empirical_coverage"]))
+    m7.metric("F6 mean over-preparation", number(metrics["mean_over_preparation"]))
+    m8.metric("F6 mean under-preparation", number(metrics["mean_under_preparation"]))
+
+    s1, s2 = st.columns(2)
+    s1.metric("F6 Saturday MAE", number(report["segments"]["Saturday"]["mae"]))
+    s2.metric("F6 Sunday MAE", number(report["segments"]["Sunday"]["mae"]))
+
+    horizon_rows = []
+    for horizon, values in report["horizons"].items():
+        horizon_rows.append(
+            {
+                "Horizon": horizon,
+                "F6 reconciled predictions": values["reconciled_count"],
+                "F6 MAE": number(values["mae"]),
+                "F6 Q80 coverage": rate(values["q80_empirical_coverage"]),
+            }
+        )
+    st.markdown("**F6 service-horizon metrics**")
+    st.dataframe(horizon_rows, use_container_width=True, hide_index=True)
+
+    st.markdown("**F6 sustainability estimates**")
+    sustainability = report["sustainability"]
+    w1, w2 = st.columns(2)
+    w1.metric(
+        "F6 estimated waste avoided",
+        f"{sustainability['total_estimated_waste_avoided_meals']:.1f} meals",
+    )
+    w2.metric(
+        "F6 estimated CO2e reduction",
+        f"{sustainability['total_estimated_co2e_reduction_kg']:.1f} kg",
+    )
+    st.caption(
+        f"These F6-only estimates use a {ESTIMATED_WASTE_REDUCTION_RATE:.0%} "
+        "meal-waste reduction assumption; they are not verified waste measurements."
+    )
+
+    st.markdown("**F6 integrity alerts**")
+    if report["integrity_alerts"]:
+        for message in report["integrity_alerts"]:
+            st.warning(message)
+    else:
+        st.success("No F6 integrity alerts.")
+
+    st.markdown("**F6 performance alerts**")
+    if report["performance_alerts"]:
+        for message in report["performance_alerts"]:
+            st.warning(message)
+    else:
+        st.success("No F6 performance alerts.")
+
+    st.markdown("**F6 training status**")
     try:
         retrain_state = get_retrain_state(location_id)
         latest_run = latest_training_run(location_id)
         latest_success = latest_successful_training_run(location_id)
+        training = f6_training_status(
+            active_package,
+            retrain_state=retrain_state,
+            latest_run=latest_run,
+            latest_successful_run=latest_success,
+        )
     except Exception as exc:
-        retrain_state = None
-        latest_run = None
-        latest_success = None
-        st.warning(f"Training status could not be loaded: {exc}")
+        training = None
+        st.warning(f"F6 training status could not be loaded: {exc}")
+    if training is not None:
+        t1, t2, t3, t4 = st.columns(4)
+        t1.metric("F6 retraining status", training["status"])
+        t2.metric("Needs F6 retraining", "Yes" if training["needs_retraining"] else "No")
+        t3.metric(
+            "Latest successful F6 training",
+            training["latest_successful_at"] or "—",
+        )
+        t4.metric("F6 training attendance rows", training["attendance_rows"] or "—")
+        st.info(training["message"])
 
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Needs retraining", "Yes" if retrain_state and retrain_state.get("dirty") else "No")
-    c2.metric("Last attendance update", retrain_state.get("last_attendance_updated_at", "N/A") if retrain_state else "N/A")
-    c3.metric(
-        "Last successful training",
-        retrain_state.get("last_successful_training_at") if retrain_state and retrain_state.get("last_successful_training_at")
-        else latest_success.get("finished_at", "Never") if latest_success else "Never",
-    )
-    c4.metric("Last status", latest_run.get("status", "No runs") if latest_run else "No runs")
-    c5.metric("Attendance rows", latest_run.get("attendance_rows", "N/A") if latest_run else "N/A")
-    if latest_run and latest_run.get("status") == "failed" and latest_run.get("error_message"):
-        st.error(latest_run["error_message"])
-
-    try:
-        summary = summarize_monitoring(location_id=monitor_location_id)
-        logs = load_prediction_logs(location_id=monitor_location_id, limit=200)
-    except Exception as exc:
-        st.warning(f"Monitoring data could not be loaded: {exc}")
+    st.markdown("**Latest F6 prediction outcomes**")
+    if not report["latest_outcomes"]:
+        st.info("No active-package F6 predictions are available yet.")
         return
-
-    c1, c2, c3, c4 = st.columns(4)
-    live_mae = summary.get("live_mae")
-    c1.metric("Live MAE", "N/A" if live_mae is None else f"{live_mae:.2f}")
-    c2.metric("Logs with actuals", int(summary.get("logs_with_actuals") or 0))
-    c3.metric("Waste avoided", f"{summary.get('total_estimated_waste_avoided_meals', 0):.1f} meals")
-    c4.metric("CO2e reduction", f"{summary.get('total_estimated_co2e_reduction_kg', 0):.1f} kg")
-    st.caption(
-        f"Estimated waste avoided is based on a {ESTIMATED_WASTE_REDUCTION_RATE:.0%} meal-waste "
-        "reduction assumption, not verified waste measurement."
-    )
-
-    st.markdown("**Cleanup**")
-    cleanup_confirm = st.checkbox(
-        "I understand this will remove prediction logs for the selected location when the service date is not in attendance."
-    )
-    if st.button("Remove logs without matching attendance record"):
-        if monitor_location_id is None:
-            st.error("Select a single location before running cleanup.")
-        elif not cleanup_confirm:
-            st.error("Please confirm cleanup first.")
-        else:
-            try:
-                attendance_df = load_clean_data(monitor_location_id)
-                removed = cleanup_logs_without_attendance(monitor_location_id, attendance_df[DATE_COL])
-                st.success(f"Removed {removed} stale prediction log row(s).")
-                st.rerun()
-            except Exception as exc:
-                st.error(f"Cleanup failed: {exc}")
-
-    if not logs:
-        st.info("No prediction logs available yet.")
-        return
-
-    columns = [
-        "service_date",
-        "predicted_visitors",
-        "suggested_meals",
-        "actual_visitors",
-        "absolute_error",
-        "waste_avoided_meals",
-        "estimated_co2e_reduction_kg",
-        "prediction_created_at",
-        "created_by",
-        "source_app",
-    ]
-    if monitor_location_id is None:
-        columns.insert(0, "location_id")
-
-    rows = []
-    for log in logs:
-        row = {column: log.get(column) for column in columns}
-        for column in [
-            "predicted_visitors",
-            "absolute_error",
-            "waste_avoided_meals",
-            "estimated_co2e_reduction_kg",
-        ]:
-            if row.get(column) is not None:
-                row[column] = round(float(row[column]), 2)
-        rows.append(row)
-    st.dataframe(rows, use_container_width=True, hide_index=True)
+    outcome_rows = []
+    for row in report["latest_outcomes"]:
+        predicted = row.get("predicted_visitors")
+        actual = row.get("actual_visitors")
+        absolute_error = None
+        if predicted is not None and actual is not None:
+            absolute_error = abs(float(predicted) - float(actual))
+        outcome_rows.append(
+            {
+                "Service date": row.get("service_date"),
+                "Segment": str(row.get("model_segment") or "").upper(),
+                "Horizon": row.get("service_horizon"),
+                "Expected visitors": None if predicted is None else round(float(predicted), 2),
+                "Raw Q80": (
+                    None
+                    if row.get("predicted_quantile") is None
+                    else round(float(row["predicted_quantile"]), 2)
+                ),
+                "Recommended meals": row.get("suggested_meals"),
+                "Actual visitors": actual,
+                "Absolute error": (
+                    None if absolute_error is None else round(absolute_error, 2)
+                ),
+            }
+        )
+    st.dataframe(outcome_rows, use_container_width=True, hide_index=True)
 
 
 
@@ -413,37 +444,11 @@ def render_data_ops():
             st.success("Saved")
             st.rerun()
 
-        st.markdown("#### Retraining")
-        try:
-            retrain_state = get_retrain_state(location_id)
-            latest_run = latest_training_run(location_id)
-            latest_success = latest_successful_training_run(location_id)
-        except Exception as exc:
-            retrain_state = None
-            latest_run = None
-            latest_success = None
-            st.warning(f"Training status could not be loaded: {exc}")
-
-        last_training = latest_success.get("finished_at", "Never") if latest_success else "Never"
-        raw_status = latest_run.get("status") if latest_run else None
-        training_status = raw_status.title() if raw_status else "Never Trained"
-        needs_retraining = "Yes" if retrain_state and retrain_state.get("dirty") else "No"
-        s1, s2, s3 = st.columns(3)
-        s1.metric("Last Training", last_training)
-        s2.metric("Training Status", training_status)
-        s3.metric("Needs Retraining", needs_retraining)
-
-        if st.button("Run Retraining Now", type="primary"):
-            with st.spinner("Training..."):
-                r = subprocess.run(
-                    [sys.executable, str(ROOT / "scripts" / "retrain_incremental.py"), "--location", location_id],
-                    cwd=ROOT,
-                )
-            if r.returncode == 0:
-                st.success("Training completed. Model updated.")
-                st.rerun()
-            else:
-                st.error("Training failed.")
+        st.markdown("#### F6 Retraining")
+        st.caption(
+            "F6 retraining uses the guarded publication workflow. Current status is "
+            "shown in F6 Model Monitoring."
+        )
 
 
 def render_master_accounts(users, location_display_row):
@@ -822,11 +827,10 @@ def render_location_management():
 
 
 
-t1, t2, t3, t4, t5, t6, t7 = st.tabs(
+t1, t2, t3, t4, t5, t6 = st.tabs(
     [
         "Prediction",
-        "Metrics",
-        "Model Monitoring",
+        "F6 Model Monitoring",
         "Data Management",
         "Staff Access",
         "Location Management",
@@ -836,14 +840,12 @@ t1, t2, t3, t4, t5, t6, t7 = st.tabs(
 with t1:
     render_prediction()
 with t2:
-    render_metrics()
-with t3:
     render_model_monitoring()
-with t4:
+with t3:
     render_data_ops()
-with t5:
+with t4:
     render_staff_access()
-with t6:
+with t5:
     render_location_management()
-with t7:
+with t6:
     render_admin_diagnostics()

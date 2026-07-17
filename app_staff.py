@@ -4,11 +4,8 @@ import streamlit as st
 
 from src.auth import authenticate_user, get_authorized_locations, get_user, require_role
 from src.config import (
-    ESTIMATED_WASTE_REDUCTION_RATE,
     ForecastHorizonError,
     ForecastTargetDateError,
-    KG_CO2E_PER_KG_FOOD_WASTE,
-    MEAL_WEIGHT_KG,
     ServiceDateParseError,
     TARGET_COL,
     model_file_for_location,
@@ -21,6 +18,7 @@ from src.data_admin import (
     load_recent_attendance,
     upsert_record,
 )
+from src.f6_monitoring import F6IntegrityError, active_f6_package
 from src.location_config import list_locations
 from src.prediction_logs import save_prediction_log, update_prediction_logs_with_actual
 from src.predictor import VisitorPredictor, WeatherForecastUnavailableError
@@ -113,40 +111,35 @@ if model_path.exists():
         predictor = VisitorPredictor(str(model_path))
     except Exception as exc:
         model_load_error = exc
+active_package = None
+f6_integrity_error = None
+if predictor is not None:
+    try:
+        active_package = active_f6_package(predictor)
+    except F6IntegrityError as exc:
+        f6_integrity_error = str(exc)
+else:
+    f6_integrity_error = "The active F6 model could not be loaded."
 delete_message = st.session_state.pop("staff_delete_message", None)
 if delete_message:
     st.success(delete_message)
 
 st.subheader(f"Daily Actions - {selected_name}")
-if predictor is None:
-    if model_path.exists() and model_load_error is not None:
-        st.warning("Model file is incompatible. Please retrain model.")
-    else:
-        st.warning("Forecast is not ready for this location. Please contact an admin.")
+if active_package is None:
+    st.error("F6 integrity error")
+    st.caption(f6_integrity_error or "The active F6 contract is unavailable.")
 else:
     ui_policy = recommendation_ui_policy(predictor)
     st.caption(ui_policy.package_caption)
-    if ui_policy.show_percentage_buffer:
-        buf = st.slider(
-            "Extra meals safety buffer (%)",
-            0,
-            30,
-            8,
-            1,
-            help="This adds a small safety margin so the kitchen prepares a few extra meals in case more visitors arrive than predicted.",
-        )
-    else:
-        buf = None
-        st.caption("F6/C0 uses the raw 80th-percentile recommendation without a percentage buffer.")
+    st.caption("Recommendation policy: C0 raw Q80")
     custom_date = st.text_input("Target service date (Saturday/Sunday, YYYY-MM-DD)", value="")
     if st.button("Get meal recommendation", type="primary"):
         try:
             normalized_date = parse_service_date(custom_date) if custom_date else None
             if normalized_date is not None and normalized_date.isoformat() != custom_date.strip():
                 st.info(f"Using service date: {normalized_date.isoformat()}")
-            meal_buffer_pct = buf / 100.0 if buf is not None else None
             pred = predictor.predict_next(
-                target_date=normalized_date, meal_buffer_pct=meal_buffer_pct
+                target_date=normalized_date, meal_buffer_pct=None
             )
         except ServiceDateParseError:
             st.error("Please enter the service date in YYYY-MM-DD format, for example 2026-07-04.")
@@ -160,18 +153,10 @@ else:
             st.error(f"Prediction failed: {exc}")
         else:
             st.success(f"Recommendation ready for {pred.service_date:%Y-%m-%d}.")
-            estimated_food_saved = pred.suggested_meals * ESTIMATED_WASTE_REDUCTION_RATE
-            estimated_carbon_reduced = estimated_food_saved * MEAL_WEIGHT_KG * KG_CO2E_PER_KG_FOOD_WASTE
-            c1, c2 = st.columns(2)
-            c1.metric(ui_policy.recommendation_label, f"{pred.suggested_meals}")
-            c2.metric("Expected Visitors", f"{pred.predicted_visitors:.1f}")
-            c3, c4 = st.columns(2)
-            c3.metric("Estimated Food Saved", f"{estimated_food_saved:.1f} meals of food")
-            c4.metric("Estimated Carbon Reduced", f"{estimated_carbon_reduced:.1f} kg CO2e")
-            st.caption(
-                f"These are planning estimates based on a {ESTIMATED_WASTE_REDUCTION_RATE:.0%} "
-                "waste-reduction assumption."
-            )
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Service date", pred.service_date.strftime("%Y-%m-%d"))
+            c2.metric("Expected visitors", f"{pred.predicted_visitors:.1f}")
+            c3.metric("Raw Q80 recommended meals", f"{pred.suggested_meals}")
             try:
                 save_prediction_log(location_id, pred, created_by=user["username"], source_app="staff")
             except Exception:

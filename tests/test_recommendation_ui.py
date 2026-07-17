@@ -12,11 +12,14 @@ def test_f6_c0_ui_hides_percentage_buffer_and_labels_raw_quantile() -> None:
         recommendation_policy_id=RECOMMENDATION_POLICY_ID,
         model_package_schema_version=2,
         package_id="f6-candidate-v1",
+        feature_contract={"feature_set_id": "F6_COMPACT_SELECTED"},
     )
     policy = recommendation_ui_policy(predictor)
     assert policy.show_percentage_buffer is False
     assert policy.recommendation_label == "Raw 80th-percentile recommendation"
-    assert policy.package_caption == "Model package: f6-candidate-v1 · schema v2"
+    assert policy.package_caption == (
+        "Model package: f6-candidate-v1 · schema v2 · F6_COMPACT_SELECTED"
+    )
 
 
 def test_legacy_ui_retains_percentage_buffer_and_identifies_schema() -> None:

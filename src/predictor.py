@@ -63,16 +63,30 @@ class VisitorPredictor:
             if not isinstance(self.feature_contract, dict):
                 raise ValueError("F6 model package feature_contract must be a mapping")
             validate_package_feature_contract(self.feature_contract, self.feature_cols)
-            missing_preprocessors = set(self.models).difference(self.preprocessors)
-            if missing_preprocessors:
+            expected_segments = {"sat", "sun"}
+            if set(self.models) != expected_segments:
                 raise ValueError(
-                    f"F6 model package lacks preprocessors: {sorted(missing_preprocessors)}"
+                    "F6 model package must contain exactly Saturday and Sunday point models"
                 )
-            missing_quantiles = set(self.models).difference(self.quantile_models)
-            if missing_quantiles:
+            if set(self.quantile_models) != expected_segments:
                 raise ValueError(
-                    f"C0 recommendation requires quantile models: {sorted(missing_quantiles)}"
+                    "F6 model package must contain exactly Saturday and Sunday quantile models"
                 )
+            if set(self.preprocessors) != expected_segments:
+                raise ValueError(
+                    "F6 model package must contain exactly Saturday and Sunday preprocessors"
+                )
+            required_history_columns = {DATE_COL, "visitors"}
+            missing_history_columns = required_history_columns.difference(
+                self.history_df.columns
+            )
+            if missing_history_columns:
+                raise ValueError(
+                    "F6 model package history is missing columns: "
+                    f"{sorted(missing_history_columns)}"
+                )
+            if self.history_df.empty:
+                raise ValueError("F6 model package attendance history is empty")
             self.recommendation_policy_id = pack.get("recommendation_policy_id")
             if self.recommendation_policy_id != RECOMMENDATION_POLICY_ID:
                 raise ValueError("F6 model package recommendation policy is not locked C0")
@@ -174,8 +188,14 @@ class VisitorPredictor:
         x = self._prepare_one_row(dt)
         if getattr(self, "uses_locked_f6", False):
             x = self.preprocessors[segment].transform(x)
+            if not np.isfinite(np.asarray(x, dtype=float)).all():
+                raise ValueError(
+                    f"F6 {segment} preprocessor produced non-finite transformed features"
+                )
         pred_point = float(self.models[segment].predict(x)[0])
         pred_q = float(self.quantile_models[segment].predict(x)[0]) if segment in self.quantile_models else pred_point
+        if not np.isfinite(pred_point) or not np.isfinite(pred_q):
+            raise ValueError("Model prediction produced a non-finite value")
 
         if getattr(
             self,

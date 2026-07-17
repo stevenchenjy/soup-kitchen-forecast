@@ -19,10 +19,17 @@ def recommendation_ui_policy(predictor: Any) -> RecommendationUiPolicy:
     )
     schema_version = int(getattr(predictor, "model_package_schema_version", 1))
     package_id = str(getattr(predictor, "package_id", "unknown"))
+    feature_set_id = ""
+    feature_contract = getattr(predictor, "feature_contract", None)
+    if isinstance(feature_contract, dict):
+        feature_set_id = str(feature_contract.get("feature_set_id", ""))
+    package_caption = f"Model package: {package_id} · schema v{schema_version}"
+    if is_f6_c0 and feature_set_id:
+        package_caption += f" · {feature_set_id}"
     return RecommendationUiPolicy(
         show_percentage_buffer=not is_f6_c0,
         recommendation_label=(
             "Raw 80th-percentile recommendation" if is_f6_c0 else "Recommended Meals"
         ),
-        package_caption=f"Model package: {package_id} · schema v{schema_version}",
+        package_caption=package_caption,
     )

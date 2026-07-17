@@ -13,6 +13,7 @@ import pandas as pd
 from src.config import DATE_COL, PROJECT_ROOT, TARGET_COL
 from src.feature_sets import F6
 from src.origin_features import (
+    OriginFeatureResult,
     T1_VALID_WEEKENDS,
     W0_NO_WEATHER,
     build_repaired_features_as_of,
@@ -204,15 +205,38 @@ def build_locked_f6_feature_row(
     *,
     service_horizon: int | None = None,
 ) -> pd.DataFrame:
+    result = build_locked_f6_feature_result(
+        attendance_history,
+        target_date,
+        forecast_origin,
+        service_horizon=service_horizon,
+    )
+    row = result.features.to_frame().T
+    row.columns = validate_locked_f6_feature_order(list(row.columns))
+    return row
+
+
+def build_locked_f6_feature_result(
+    attendance_history: pd.DataFrame,
+    target_date: Any,
+    forecast_origin: Any,
+    *,
+    service_horizon: int | None = None,
+) -> OriginFeatureResult:
+    """Build one locked F6 row with auditable origin-valid provenance."""
+
     target = pd.Timestamp(target_date).normalize()
     origin = pd.Timestamp(forecast_origin).normalize()
+    history = normalize_t1_history(attendance_history)
+    if history.empty:
+        raise ValueError("Attendance history is empty")
     horizon = (
         service_horizon_between(origin, target)
         if service_horizon is None
         else int(service_horizon)
     )
     result = build_repaired_features_as_of(
-        normalize_t1_history(attendance_history),
+        history,
         target,
         origin,
         calendar_days_ahead=int((target - origin).days),
@@ -220,9 +244,8 @@ def build_locked_f6_feature_row(
         weekday_policy=T1_VALID_WEEKENDS,
         feature_cols=list(LOCKED_F6_FEATURES),
     )
-    row = result.features.to_frame().T
-    row.columns = validate_locked_f6_feature_order(list(row.columns))
-    return row
+    validate_locked_f6_feature_order(list(result.features.index))
+    return result
 
 
 def build_locked_f6_training_frame(

@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from datetime import date
+import hashlib
+import json
 import math
+from pathlib import Path
 from statistics import fmean, median
 from typing import Any, Iterable, Mapping
 
+from src.config import PROJECT_ROOT
 from src.feature_sets import F6
 from src.production_features import (
     LOCKED_F6_FEATURE_ORDER_SHA256,
@@ -16,6 +21,17 @@ from src.production_features import (
 
 
 TRAINING_PROVENANCE_KEY = "_f6_package_provenance"
+VERIFIED_BACKTEST_DIR = PROJECT_ROOT / "config" / "model_backtests"
+_BACKTEST_METRIC_KEYS = {
+    "mae",
+    "median_absolute_error",
+    "rmse",
+    "mean_signed_error",
+    "underprediction_rate",
+    "q80_empirical_coverage",
+    "mean_over_preparation",
+    "mean_under_preparation",
+}
 
 
 @dataclass(frozen=True)
@@ -30,6 +46,10 @@ class ActiveF6Package:
 
 class F6IntegrityError(ValueError):
     """Raised when the active model does not satisfy the locked F6 contract."""
+
+
+class BacktestSummaryError(ValueError):
+    """Raised when verified historical performance cannot be authenticated."""
 
 
 def active_f6_package(predictor: Any) -> ActiveF6Package:
@@ -118,6 +138,136 @@ def filter_active_f6_rows(
     """Copy only rows that match the currently active F6 package contract."""
 
     return [dict(row) for row in rows if row_matches_active_f6(row, contract)]
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _verified_source_path(value: Any) -> Path:
+    relative = Path(str(value or ""))
+    if not str(relative) or relative.is_absolute() or ".." in relative.parts:
+        raise BacktestSummaryError("Verified backtest source path is invalid.")
+    source = (PROJECT_ROOT / relative).resolve()
+    if PROJECT_ROOT.resolve() not in source.parents:
+        raise BacktestSummaryError("Verified backtest source is outside the project.")
+    return source
+
+
+def load_verified_backtest_summary(
+    contract: ActiveF6Package,
+    *,
+    summary_path: str | Path | None = None,
+    verify_sources: bool = True,
+) -> dict[str, Any]:
+    """Load a package-bound historical backtest summary and verify its provenance."""
+
+    if summary_path is None:
+        if Path(contract.package_id).name != contract.package_id:
+            raise BacktestSummaryError("Active package ID cannot identify a backtest summary.")
+        path = VERIFIED_BACKTEST_DIR / f"{contract.package_id}.json"
+    else:
+        path = Path(summary_path)
+    try:
+        summary = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise BacktestSummaryError(
+            f"No verified historical backtest is registered for {contract.package_id}."
+        ) from exc
+    except (OSError, json.JSONDecodeError) as exc:
+        raise BacktestSummaryError("Verified historical backtest could not be loaded.") from exc
+    if not isinstance(summary, dict):
+        raise BacktestSummaryError("Verified historical backtest must be a mapping.")
+    if summary.get("summary_schema_version") != 1:
+        raise BacktestSummaryError("Historical backtest summary schema is unsupported.")
+
+    expected_contract = {
+        "package_id": contract.package_id,
+        "model_package_schema_version": contract.schema_version,
+        "feature_set_id": contract.feature_set_id,
+        "feature_order_sha256": contract.feature_order_sha256,
+        "recommendation_policy_id": contract.recommendation_policy_id,
+    }
+    if summary.get("verification_status") != "verified":
+        raise BacktestSummaryError("Historical backtest is not marked verified.")
+    for field, expected in expected_contract.items():
+        if summary.get(field) != expected:
+            raise BacktestSummaryError(
+                f"Historical backtest {field} does not match the active package."
+            )
+
+    metrics = summary.get("metrics")
+    if not isinstance(metrics, Mapping) or not _BACKTEST_METRIC_KEYS.issubset(metrics):
+        raise BacktestSummaryError("Historical backtest metrics are incomplete.")
+    if any(_finite_number(metrics.get(key)) is None for key in _BACKTEST_METRIC_KEYS):
+        raise BacktestSummaryError("Historical backtest metrics contain invalid values.")
+    try:
+        date.fromisoformat(str(summary.get("attendance_cutoff") or ""))
+    except ValueError as exc:
+        raise BacktestSummaryError("Historical backtest attendance cutoff is invalid.") from exc
+    segments = summary.get("segments")
+    if not isinstance(segments, Mapping) or any(
+        _finite_number((segments.get(label) or {}).get("mae")) is None
+        for label in ("Saturday", "Sunday")
+    ):
+        raise BacktestSummaryError("Historical segment metrics are incomplete.")
+    horizons = summary.get("horizons")
+    if not isinstance(horizons, Mapping) or any(
+        _finite_number((horizons.get(label) or {}).get("mae")) is None
+        for label in ("H1", "H2", "H5")
+    ):
+        raise BacktestSummaryError("Historical horizon metrics are incomplete.")
+
+    if verify_sources:
+        sources = summary.get("source_artifacts")
+        if not isinstance(sources, list) or not sources:
+            raise BacktestSummaryError("Historical backtest source provenance is missing.")
+        for source_record in sources:
+            if not isinstance(source_record, Mapping):
+                raise BacktestSummaryError("Historical backtest source record is invalid.")
+            source = _verified_source_path(source_record.get("path"))
+            if not source.is_file():
+                raise BacktestSummaryError(f"Verified backtest source is missing: {source.name}")
+            if _sha256_file(source) != str(source_record.get("sha256") or ""):
+                raise BacktestSummaryError(
+                    f"Verified backtest source hash does not match: {source.name}"
+                )
+    return summary
+
+
+def build_operational_impact(
+    attendance_row_count: int | None,
+    rows: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Summarize cumulative operational records without package filtering."""
+
+    materialized = [dict(row) for row in rows]
+    waste = [
+        value
+        for row in materialized
+        if (value := _finite_number(row.get("waste_avoided_meals"))) is not None
+    ]
+    co2e = [
+        value
+        for row in materialized
+        if (value := _finite_number(row.get("estimated_co2e_reduction_kg")))
+        is not None
+    ]
+    return {
+        "attendance_row_count": (
+            None if attendance_row_count is None else max(int(attendance_row_count), 0)
+        ),
+        "prediction_log_count": len(materialized),
+        "reconciled_log_count": sum(
+            1 for row in materialized if _finite_number(row.get("actual_visitors")) is not None
+        ),
+        "estimated_food_saved_meals": sum(waste),
+        "estimated_co2e_reduction_kg": sum(co2e),
+    }
 
 
 def monitoring_stage(reconciled_count: int) -> str:
@@ -312,26 +462,26 @@ def build_f6_monitoring_report(
     integrity_alerts: list[str] = []
     if missing_hash_count:
         integrity_alerts.append(
-            f"{missing_hash_count} active F6 prediction row(s) do not contain feature-hash provenance."
+            f"{missing_hash_count} active prediction row(s) do not contain feature-hash provenance."
         )
     if invalid_reconciled_count:
         integrity_alerts.append(
-            f"{invalid_reconciled_count} active F6 row(s) have invalid reconciliation values."
+            f"{invalid_reconciled_count} active row(s) have invalid reconciliation values."
         )
 
     performance_alerts: list[str] = []
     if reconciled_count <= 3:
         performance_alerts.append(
-            "F6 performance is insufficient for operational conclusions."
+            "Production performance is insufficient for operational conclusions."
         )
     else:
         coverage = metrics["q80_empirical_coverage"]
         if coverage is not None and coverage < 0.80:
-            performance_alerts.append("F6 Q80 empirical coverage is below 80%.")
+            performance_alerts.append("Production Q80 empirical coverage is below 80%.")
         under_rate = metrics["underprediction_rate"]
         if under_rate is not None and under_rate > 0.50:
             performance_alerts.append(
-                "F6 point predictions underpredict more than half of reconciled services."
+                "Point predictions underpredict more than half of reconciled services."
             )
 
     waste_values = [
@@ -431,10 +581,12 @@ def f6_training_status(
     )
 
     if matching_success is None:
-        message = "Activated from verified candidate; first genuine F6 retraining pending"
+        message = (
+            "Activated from verified candidate; first genuine production retraining pending."
+        )
         latest_successful_at = None
     else:
-        message = "Confirmed F6 training run available"
+        message = "Confirmed production training run available."
         latest_successful_at = matching_success.get("finished_at")
 
     if dirty:

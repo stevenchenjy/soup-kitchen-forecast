@@ -73,6 +73,14 @@ jobs:
             fi
 
             git add -f -- "$model_path"
+            if [ "$location_id" = "ny_12550" ]; then
+              previous_active_backup="models/backups/ny_12550_previous_active.joblib"
+              if [ ! -f "$previous_active_backup" ]; then
+                echo "Expected F6 previous-active backup not found: $previous_active_backup"
+                exit 1
+              fi
+              git add -f -- "$previous_active_backup"
+            fi
             if [ -d "$artifact_path" ]; then
               git add -f -- "$artifact_path/"
             fi
@@ -101,10 +109,15 @@ jobs:
 
           python - "${MODEL_PATHS[@]}" <<'PY'
           import sys
+          from src.model_publication import validate_f6_package_file
           from src.predictor import VisitorPredictor
 
           for model_path in sys.argv[1:]:
-              VisitorPredictor(model_path)
+              predictor = VisitorPredictor(model_path)
+              if model_path == "models/visitor_model_ny_12550.joblib":
+                  validate_f6_package_file(model_path)
+                  if predictor.model_package_schema_version != 2:
+                      raise RuntimeError("ny_12550 nightly publication is not schema v2")
               print(f"Validated {model_path}")
           PY
 

@@ -333,14 +333,14 @@ def test_candidate_package_has_complete_metadata_checksums_and_no_activation(
     assert sha256(active_path) == active_before == ACTIVE_MODEL_SHA256
 
 
-def test_nightly_active_training_remains_legacy_schema_v1() -> None:
+def test_legacy_trainer_remains_schema_v1_for_unmigrated_locations() -> None:
     history = attendance_history()
     fake_outputs = {
         key: {"metrics": {"BacktestRows": 0}, "predictions": pd.DataFrame()}
         for key in ("overall", "sat", "sun")
     }
     dumped: list[dict] = []
-    assert nightly_retrain.train_location is train_backtest.train_location
+    assert nightly_retrain.train_legacy_location is train_backtest.train_location
 
     with patch.object(train_backtest, "bootstrap_location_from_csv"), patch.object(
         train_backtest, "load_clean_data", return_value=history

@@ -4,19 +4,30 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import joblib
+import pandas as pd
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.train_backtest import train_location
+from scripts.train_backtest import train_location as train_legacy_location
+from scripts.train_f6_candidate import build_f6_model_package
 from src.config import artifact_dir_for_location, model_file_for_location
 from src.data_admin import load_clean_data
 from src.location_config import Location, list_locations
+from src.model_publication import (
+    atomic_publish_f6_package,
+    sha256_file,
+    validate_f6_package_file,
+    validate_package_in_fresh_process,
+)
 from src.model_training_runs import (
     create_training_run,
     get_retrain_state,
@@ -25,6 +36,10 @@ from src.model_training_runs import (
     mark_location_dirty,
     supabase_configured,
 )
+
+
+F6_NIGHTLY_LOCATION_IDS = frozenset({"ny_12550"})
+F6_PREVIOUS_ACTIVE_BACKUP = ROOT / "models/backups/ny_12550_previous_active.joblib"
 
 
 def _relative_path(path: Path) -> str:
@@ -75,6 +90,76 @@ def _latest_attendance_update(location_id: str) -> str | None:
     if state and state.get("last_attendance_updated_at"):
         return state["last_attendance_updated_at"]
     return latest_attendance_updated_at(location_id)
+
+
+def _nightly_f6_package_id(location_id: str, attendance_df: pd.DataFrame) -> str:
+    latest_service_date = pd.to_datetime(
+        attendance_df["service_date"], errors="raise"
+    ).max().date().isoformat()
+    return f"{location_id}_f6_nightly_{latest_service_date}_v1"
+
+
+def _write_f6_metrics(location_id: str, metrics: dict[str, Any]) -> None:
+    artifact_dir = artifact_dir_for_location(location_id)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    destination = artifact_dir / "metrics.json"
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.tmp-", dir=artifact_dir
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(metrics, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_name, destination)
+    except Exception:
+        Path(temporary_name).unlink(missing_ok=True)
+        raise
+
+
+def train_f6_location(location: Location, attendance_df: pd.DataFrame) -> Path:
+    """Train, validate, and atomically publish locked F6 for a protected location."""
+
+    package_id = _nightly_f6_package_id(location.id, attendance_df)
+    package, metrics = build_f6_model_package(
+        location_id=location.id,
+        attendance=attendance_df,
+        package_id=package_id,
+        package_status="nightly_pending_publication",
+    )
+    model_path = model_file_for_location(location.id)
+    model_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{model_path.name}.nightly-", suffix=".joblib", dir=model_path.parent
+    )
+    os.close(descriptor)
+    temporary_path = Path(temporary_name)
+    try:
+        joblib.dump(package, temporary_path)
+        package_sha256 = sha256_file(temporary_path)
+        validate_f6_package_file(
+            temporary_path,
+            expected_sha256=package_sha256,
+            expected_package_id=package_id,
+        )
+        validate_package_in_fresh_process(
+            temporary_path,
+            expected_schema=2,
+            expected_sha256=package_sha256,
+            expected_package_id=package_id,
+        )
+        _write_f6_metrics(location.id, metrics)
+        atomic_publish_f6_package(
+            temporary_path,
+            model_path,
+            expected_source_sha256=package_sha256,
+            expected_package_id=package_id,
+            previous_active_backup=F6_PREVIOUS_ACTIVE_BACKUP,
+        )
+        return model_path
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 def _print_summary(
@@ -132,11 +217,14 @@ def retrain_one_location(location: Location, args: argparse.Namespace) -> str:
     print(f"{location.id}: training started", flush=True)
 
     try:
-        trained_model_path = train_location(
-            location_id=location.id,
-            min_train_size=args.min_train_size,
-            quantile=args.quantile,
-        )
+        if location.id in F6_NIGHTLY_LOCATION_IDS:
+            trained_model_path = train_f6_location(location, attendance_df)
+        else:
+            trained_model_path = train_legacy_location(
+                location_id=location.id,
+                min_train_size=args.min_train_size,
+                quantile=args.quantile,
+            )
         metrics = _load_metrics(location.id)
         finished_at = datetime.now(timezone.utc).isoformat()
         create_training_run(

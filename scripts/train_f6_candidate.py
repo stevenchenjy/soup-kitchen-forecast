@@ -336,6 +336,75 @@ def candidate_package_metadata(
     }
 
 
+def build_f6_model_package(
+    *,
+    location_id: str,
+    attendance: pd.DataFrame,
+    package_id: str,
+    package_status: str,
+    created_at_utc: str | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Train the locked production package from an already-loaded attendance frame."""
+
+    bundle = build_locked_f6_training_frame(attendance)
+    if bundle.df.empty:
+        raise ValueError(f"Not enough historical data to train location '{location_id}'.")
+
+    outputs = rolling_backtest_by_daytype(
+        bundle.df,
+        bundle.feature_cols,
+        min_train_size=LOCKED_MIN_TRAIN_SIZE,
+        quantile=LOCKED_QUANTILE,
+    )
+    models, quantile_models, preprocessors = fit_final_models_by_daytype(
+        bundle.df,
+        bundle.feature_cols,
+        quantile=LOCKED_QUANTILE,
+        return_preprocessors=True,
+    )
+    required_segments = {"sat", "sun"}
+    if set(models) != required_segments:
+        raise ValueError("F6 training must produce separate Saturday and Sunday models")
+    if set(quantile_models) != required_segments or set(preprocessors) != required_segments:
+        raise ValueError("F6 package is missing a segment quantile model or preprocessor")
+
+    metrics = {
+        key: outputs.get(key, {}).get("metrics", {"BacktestRows": 0})
+        for key in ("overall", "sat", "sun")
+    }
+    created_at = created_at_utc or datetime.now(timezone.utc).isoformat()
+    location = get_location(location_id)
+    package = {
+        "package_id": package_id,
+        "package_status": package_status,
+        "created_at_utc": created_at,
+        "location_id": location_id,
+        "model_package_schema_version": MODEL_PACKAGE_SCHEMA_VERSION,
+        "models": models,
+        "quantile_models": quantile_models,
+        "preprocessors": preprocessors,
+        "feature_cols": bundle.feature_cols,
+        "feature_contract": locked_feature_contract_metadata(),
+        "history_df": bundle.history_df.copy(),
+        "recommendation_policy_id": RECOMMENDATION_POLICY_ID,
+        "default_meal_buffer_pct": 0.0,
+        "residual_buffer_by_day": {"sat": 0.0, "sun": 0.0},
+        "preprocessing_contract": {
+            "class": "SimpleImputer",
+            "strategy": "median",
+            "keep_empty_features": True,
+            "scope": "separate_saturday_sunday_full_training_segment",
+        },
+        "weather_context": {
+            "zip_code": location.zip_code,
+            "country_code": location.country_code,
+            "timezone": location.timezone,
+        },
+        "metrics": metrics,
+    }
+    return package, metrics
+
+
 def train_f6_candidate(
     *,
     location_id: str,
@@ -376,62 +445,14 @@ def train_f6_candidate(
         raise ValueError(
             "Attendance CSV SHA-256 does not match the expected source fingerprint"
         )
-    bundle = build_locked_f6_training_frame(attendance)
-    if bundle.df.empty:
-        raise ValueError(f"Not enough historical data to train location '{location_id}'.")
-
-    outputs = rolling_backtest_by_daytype(
-        bundle.df,
-        bundle.feature_cols,
-        min_train_size=LOCKED_MIN_TRAIN_SIZE,
-        quantile=LOCKED_QUANTILE,
-    )
-    models, quantile_models, preprocessors = fit_final_models_by_daytype(
-        bundle.df,
-        bundle.feature_cols,
-        quantile=LOCKED_QUANTILE,
-        return_preprocessors=True,
-    )
-    required_segments = {"sat", "sun"}
-    if set(models) != required_segments:
-        raise ValueError("F6 candidate training must produce separate Saturday and Sunday models")
-    if set(quantile_models) != required_segments or set(preprocessors) != required_segments:
-        raise ValueError("F6 candidate package is missing a segment quantile model or preprocessor")
-
-    metrics = {
-        key: outputs.get(key, {}).get("metrics", {"BacktestRows": 0})
-        for key in ("overall", "sat", "sun")
-    }
     created_at_utc = datetime.now(timezone.utc).isoformat()
-    location = get_location(location_id)
-    package = {
-        "package_id": package_id,
-        "package_status": "candidate_not_active",
-        "created_at_utc": created_at_utc,
-        "location_id": location_id,
-        "model_package_schema_version": MODEL_PACKAGE_SCHEMA_VERSION,
-        "models": models,
-        "quantile_models": quantile_models,
-        "preprocessors": preprocessors,
-        "feature_cols": bundle.feature_cols,
-        "feature_contract": locked_feature_contract_metadata(),
-        "history_df": bundle.history_df.copy(),
-        "recommendation_policy_id": RECOMMENDATION_POLICY_ID,
-        "default_meal_buffer_pct": 0.0,
-        "residual_buffer_by_day": {"sat": 0.0, "sun": 0.0},
-        "preprocessing_contract": {
-            "class": "SimpleImputer",
-            "strategy": "median",
-            "keep_empty_features": True,
-            "scope": "separate_saturday_sunday_full_training_segment",
-        },
-        "weather_context": {
-            "zip_code": location.zip_code,
-            "country_code": location.country_code,
-            "timezone": location.timezone,
-        },
-        "metrics": metrics,
-    }
+    package, metrics = build_f6_model_package(
+        location_id=location_id,
+        attendance=attendance,
+        package_id=package_id,
+        package_status="candidate_not_active",
+        created_at_utc=created_at_utc,
+    )
     metadata = candidate_package_metadata(
         package_id=package_id,
         location_id=location_id,

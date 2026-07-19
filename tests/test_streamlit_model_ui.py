@@ -17,6 +17,7 @@ import streamlit as st
 from streamlit.testing.v1 import AppTest
 
 from src.f6_readiness import prediction_signature
+from src.f6_monitoring import BacktestChartError
 from src.location_config import Location
 from src.predictor import VisitorPredictor
 from src.production_features import LOCKED_F6_FEATURE_ORDER_SHA256
@@ -247,6 +248,8 @@ def _tree_text_excluding_expander(app: AppTest, excluded_label: str) -> str:
     values: list[str] = []
 
     def visit(node: Any) -> None:
+        if getattr(node, "type", None) == "vega_lite_chart":
+            return
         if (
             getattr(node, "type", None) == "expander"
             and getattr(node, "label", None) == excluded_label
@@ -516,6 +519,7 @@ def _run_admin_monitoring_ui(
     retrain_state: dict[str, Any] | None = None,
     latest_run: dict[str, Any] | None = None,
     latest_successful_run: dict[str, Any] | None = None,
+    chart_error: bool = False,
 ) -> AppTest:
     saved_logs: list[tuple[Any, ...]] = []
     attendance = pd.DataFrame(
@@ -538,6 +542,13 @@ def _run_admin_monitoring_ui(
             latest_run=latest_run,
             latest_successful_run=latest_successful_run,
         )
+        if chart_error:
+            stack.enter_context(
+                patch(
+                    "src.f6_monitoring.load_verified_backtest_chart_series",
+                    side_effect=BacktestChartError("synthetic chart failure"),
+                )
+            )
         app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=60)
         app.session_state["user"] = {"username": "admin-test"}
         app.run()
@@ -642,6 +653,10 @@ def test_staff_recent_attendance_requests_and_displays_latest_seven() -> None:
         "2026-05-31",
     ]
     assert dataframe_heights == [283]
+    assert not app.get("vega_lite_chart")
+    assert any(
+        element.label == "View full attendance history" for element in app.expander
+    )
 
 
 def test_staff_recent_attendance_renders_fewer_rows_without_blank_space() -> None:
@@ -890,9 +905,29 @@ def test_admin_monitoring_zero_live_rows_keeps_backtest_and_cumulative_impact() 
     )
     assert "Latest Production Outcomes" not in text
     assert "Model Performance" in text
+    assert "Actual vs Predicted" in text
+    assert "Absolute Error Over Time" in text
+    assert "Origin-aware historical predictions through July 12, 2026." in text
+    assert len(app.get("vega_lite_chart")) == 2
     assert "F6-only performance" not in text
     assert not [label for label in metrics if label.startswith("F6")]
     assert "fallback" not in text.lower()
+
+
+def test_admin_chart_failure_preserves_verified_aggregate_metrics() -> None:
+    app = _run_admin_monitoring_ui(
+        _mixed_history_rows()[:10],
+        chart_error=True,
+    )
+    metrics = _metric_values(app)
+    text = _element_text(app)
+
+    assert metrics["MAE"] == "13.63"
+    assert metrics["RMSE"] == "17.74"
+    assert "Historical performance charts are temporarily unavailable." in text
+    assert "Model Performance" in text
+    assert "Live Performance" in text
+    assert not app.get("vega_lite_chart")
 
 
 def test_admin_monitoring_clean_deployment_uses_tracked_backtest_summary() -> None:

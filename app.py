@@ -25,7 +25,12 @@ from src.config import (
     parse_service_date,
 )
 from src.data_admin import attendance_store_mode, delete_record, load_clean_data, save_clean_data, upsert_record
+from src.f6_charts import (
+    build_absolute_error_chart,
+    build_actual_vs_predicted_chart,
+)
 from src.f6_monitoring import (
+    BacktestChartError,
     BacktestSummaryError,
     F6IntegrityError,
     active_f6_package,
@@ -33,6 +38,7 @@ from src.f6_monitoring import (
     build_f6_monitoring_report,
     f6_training_status,
     format_dashboard_date,
+    load_verified_backtest_chart_series,
     load_verified_backtest_summary,
     retraining_status_label,
 )
@@ -258,6 +264,25 @@ def render_model_monitoring():
         h1.metric("H1 MAE", number(backtest["horizons"]["H1"]["mae"]))
         h2.metric("H2 MAE", number(backtest["horizons"]["H2"]["mae"]))
         h5.metric("H5 MAE", number(backtest["horizons"]["H5"]["mae"]))
+
+        try:
+            chart_series = load_verified_backtest_chart_series(active_package)
+        except BacktestChartError:
+            st.warning("Historical performance charts are temporarily unavailable.")
+        else:
+            st.markdown("#### Actual vs Predicted")
+            st.altair_chart(
+                build_actual_vs_predicted_chart(chart_series),
+                use_container_width=True,
+            )
+            st.caption(
+                "Origin-aware historical predictions through July 12, 2026."
+            )
+            st.markdown("#### Absolute Error Over Time")
+            st.altair_chart(
+                build_absolute_error_chart(chart_series),
+                use_container_width=True,
+            )
 
     st.markdown("### Live Performance")
     try:

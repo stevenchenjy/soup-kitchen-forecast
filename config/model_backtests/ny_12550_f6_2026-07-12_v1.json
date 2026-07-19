@@ -16,6 +16,15 @@
     "weather_policy": "W0_no_weather",
     "row_count": 322
   },
+  "chart_dataset": {
+    "path": "config/model_backtests/ny_12550_f6_2026-07-12_v1_predictions.csv",
+    "sha256": "8cd73e08d215c2e428e4b99ce5fd972e8be3ac3ed9b6fb36e43aef1df956d982",
+    "row_count": 322,
+    "minimum_service_date": "2023-05-13",
+    "maximum_service_date": "2026-07-12",
+    "scope_type": "scenario",
+    "scope_value": "S3_next_service"
+  },
   "metrics": {
     "mae": 13.62696513246822,
     "median_absolute_error": 10.253146148989984,
@@ -65,6 +74,11 @@
       "path": "artifacts/ny_12550/model_optimization/phase2c_lite_calibration/10_daytype_scenario_horizon.csv",
       "sha256": "f224054790e639cfd629d0e70e75cf43a30a344e801bdc3982536bc8b419bf36",
       "provides": "C0 raw-Q80 operational preparation metrics"
+    },
+    {
+      "path": "artifacts/ny_12550/model_optimization/phase2c_lite_calibration/05_calibrated_predictions.csv",
+      "sha256": "2daa51cd858f26557d26cc7da4614a8a96e001645ac86cfe27cc6623943918ef",
+      "provides": "authoritative origin-aware F6 C0 S3 rows used to generate the tracked chart dataset"
     }
   ]
 }

@@ -11,6 +11,8 @@ from pathlib import Path
 from statistics import fmean, median
 from typing import Any, Iterable, Mapping
 
+import pandas as pd
+
 from src.config import PROJECT_ROOT
 from src.feature_sets import F6
 from src.production_features import (
@@ -50,6 +52,10 @@ class F6IntegrityError(ValueError):
 
 class BacktestSummaryError(ValueError):
     """Raised when verified historical performance cannot be authenticated."""
+
+
+class BacktestChartError(ValueError):
+    """Raised when a tracked historical chart series cannot be authenticated."""
 
 
 def active_f6_package(predictor: Any) -> ActiveF6Package:
@@ -158,6 +164,16 @@ def _verified_source_path(value: Any) -> Path:
     return source
 
 
+def _registered_chart_path(value: Any) -> Path:
+    relative = Path(str(value or ""))
+    if not str(relative) or relative.is_absolute() or ".." in relative.parts:
+        raise BacktestChartError("Historical chart dataset path is invalid.")
+    chart_path = (PROJECT_ROOT / relative).resolve()
+    if PROJECT_ROOT.resolve() not in chart_path.parents:
+        raise BacktestChartError("Historical chart dataset is outside the project.")
+    return chart_path
+
+
 def load_verified_backtest_summary(
     contract: ActiveF6Package,
     *,
@@ -242,6 +258,122 @@ def load_verified_backtest_summary(
                     f"Verified backtest source hash does not match: {source.name}"
                 )
     return summary
+
+
+def load_verified_backtest_chart_series(
+    contract: ActiveF6Package,
+    *,
+    summary_path: str | Path | None = None,
+) -> pd.DataFrame:
+    """Load and authenticate the tracked chart series for the active package."""
+
+    try:
+        summary = load_verified_backtest_summary(
+            contract,
+            summary_path=summary_path,
+        )
+    except BacktestSummaryError as exc:
+        raise BacktestChartError(
+            "Historical chart package binding could not be verified."
+        ) from exc
+
+    registration = summary.get("chart_dataset")
+    if not isinstance(registration, Mapping):
+        raise BacktestChartError("Historical chart dataset is not registered.")
+    if registration.get("scope_type") != "scenario":
+        raise BacktestChartError("Historical chart scope registration is invalid.")
+    scope_value = str(registration.get("scope_value") or "")
+    evaluation = summary.get("evaluation")
+    if not isinstance(evaluation, Mapping) or scope_value != str(
+        evaluation.get("primary_scope") or ""
+    ):
+        raise BacktestChartError("Historical chart scope does not match the summary.")
+
+    chart_path = _registered_chart_path(registration.get("path"))
+    if not chart_path.is_file():
+        raise BacktestChartError("Tracked historical chart dataset is missing.")
+    if _sha256_file(chart_path) != str(registration.get("sha256") or ""):
+        raise BacktestChartError("Historical chart dataset hash does not match.")
+
+    try:
+        frame = pd.read_csv(chart_path)
+    except (OSError, UnicodeError, pd.errors.ParserError) as exc:
+        raise BacktestChartError("Historical chart dataset could not be loaded.") from exc
+
+    required_columns = {
+        "service_date",
+        "actual_visitors",
+        "point_prediction",
+        "q80_prediction",
+        "absolute_error",
+        "model_segment",
+        "service_horizon",
+        "scenario",
+    }
+    if not required_columns.issubset(frame.columns):
+        raise BacktestChartError("Historical chart dataset columns are incomplete.")
+
+    try:
+        registered_rows = int(registration.get("row_count"))
+        evaluation_rows = int(evaluation.get("row_count"))
+    except (TypeError, ValueError) as exc:
+        raise BacktestChartError("Historical chart row-count registration is invalid.") from exc
+    if registered_rows != evaluation_rows:
+        raise BacktestChartError("Historical chart row count does not match the summary.")
+    if len(frame) != registered_rows:
+        raise BacktestChartError("Historical chart row count does not match.")
+
+    parsed_dates = pd.to_datetime(
+        frame["service_date"], format="%Y-%m-%d", errors="coerce"
+    )
+    if parsed_dates.isna().any():
+        raise BacktestChartError("Historical chart service dates are invalid.")
+    frame = frame.copy()
+    frame["service_date"] = parsed_dates
+
+    numeric_columns = (
+        "actual_visitors",
+        "point_prediction",
+        "q80_prediction",
+        "absolute_error",
+        "service_horizon",
+    )
+    for column in numeric_columns:
+        converted = pd.to_numeric(frame[column], errors="coerce")
+        if converted.isna().any() or not converted.map(math.isfinite).all():
+            raise BacktestChartError("Historical chart numeric values are invalid.")
+        frame[column] = converted
+
+    expected_error = (frame["point_prediction"] - frame["actual_visitors"]).abs()
+    if not (frame["absolute_error"] - expected_error).abs().le(1e-9).all():
+        raise BacktestChartError("Historical chart absolute errors are inconsistent.")
+
+    if not frame["model_segment"].isin({"sat", "sun"}).all():
+        raise BacktestChartError("Historical chart segment values are invalid.")
+    if not frame["scenario"].eq(scope_value).all():
+        raise BacktestChartError("Historical chart rows do not match the registered scope.")
+
+    try:
+        registered_minimum = pd.Timestamp(
+            date.fromisoformat(str(registration.get("minimum_service_date") or ""))
+        )
+        registered_maximum = pd.Timestamp(
+            date.fromisoformat(str(registration.get("maximum_service_date") or ""))
+        )
+        attendance_cutoff = pd.Timestamp(
+            date.fromisoformat(str(summary.get("attendance_cutoff") or ""))
+        )
+    except ValueError as exc:
+        raise BacktestChartError("Historical chart date registration is invalid.") from exc
+    if (
+        frame["service_date"].min() != registered_minimum
+        or frame["service_date"].max() != registered_maximum
+    ):
+        raise BacktestChartError("Historical chart date range does not match.")
+    if frame["service_date"].max() > attendance_cutoff:
+        raise BacktestChartError("Historical chart exceeds the attendance cutoff.")
+
+    return frame.sort_values("service_date", kind="stable").reset_index(drop=True)
 
 
 def format_dashboard_date(value: Any) -> str:

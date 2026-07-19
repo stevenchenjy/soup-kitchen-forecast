@@ -12,6 +12,7 @@ import pytest
 from src import prediction_logs
 from src.f6_monitoring import (
     ActiveF6Package,
+    BacktestChartError,
     BacktestSummaryError,
     TRAINING_PROVENANCE_KEY,
     active_f6_package,
@@ -20,6 +21,7 @@ from src.f6_monitoring import (
     f6_training_status,
     filter_active_f6_rows,
     format_dashboard_date,
+    load_verified_backtest_chart_series,
     load_verified_backtest_summary,
     monitoring_stage,
     retraining_status_label,
@@ -31,6 +33,13 @@ PACKAGE_ID = "ny_12550_f6_2026-07-12_v1"
 FEATURE_SET_ID = "F6_COMPACT_SELECTED"
 POLICY_ID = "C0_EXISTING_RAW_QUANTILE"
 ROOT = Path(__file__).resolve().parents[1]
+BACKTEST_SUMMARY = ROOT / "config/model_backtests" / f"{PACKAGE_ID}.json"
+BACKTEST_CHART = (
+    ROOT / "config/model_backtests" / f"{PACKAGE_ID}_predictions.csv"
+)
+BACKTEST_CHART_SHA256 = (
+    "8cd73e08d215c2e428e4b99ce5fd972e8be3ac3ed9b6fb36e43aef1df956d982"
+)
 POINT_RESEARCH_METRICS = (
     ROOT
     / "artifacts/ny_12550/model_optimization/phase2b1_training_windows/06_training_window_metrics.csv"
@@ -39,6 +48,21 @@ OPERATIONAL_RESEARCH_METRICS = (
     ROOT
     / "artifacts/ny_12550/model_optimization/phase2c_lite_calibration/10_daytype_scenario_horizon.csv"
 )
+CHART_RESEARCH_PREDICTIONS = (
+    ROOT
+    / "artifacts/ny_12550/model_optimization/phase2c_lite_calibration/05_calibrated_predictions.csv"
+)
+
+
+def temporary_backtest_bundle(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
+    bundle_dir = tmp_path / "config/model_backtests"
+    bundle_dir.mkdir(parents=True)
+    summary_path = bundle_dir / BACKTEST_SUMMARY.name
+    chart_path = bundle_dir / BACKTEST_CHART.name
+    summary_path.write_bytes(BACKTEST_SUMMARY.read_bytes())
+    chart_path.write_bytes(BACKTEST_CHART.read_bytes())
+    monkeypatch.setattr("src.f6_monitoring.PROJECT_ROOT", tmp_path)
+    return summary_path, chart_path
 
 
 def predictor(package_id: str = PACKAGE_ID, **overrides):
@@ -277,6 +301,146 @@ def test_verified_backtest_summary_loads_without_deployed_source_artifacts(
 
     assert summary["verification_status"] == "verified"
     assert summary["package_id"] == PACKAGE_ID
+
+
+def test_tracked_backtest_chart_is_registered_with_matching_hash() -> None:
+    summary = load_verified_backtest_summary(active_f6_package(predictor()))
+    registration = summary["chart_dataset"]
+
+    assert BACKTEST_CHART.is_file()
+    assert registration["path"] == BACKTEST_CHART.relative_to(ROOT).as_posix()
+    assert registration["sha256"] == BACKTEST_CHART_SHA256
+    assert (
+        hashlib.sha256(BACKTEST_CHART.read_bytes()).hexdigest()
+        == BACKTEST_CHART_SHA256
+    )
+    assert registration["row_count"] == summary["evaluation"]["row_count"] == 322
+    assert registration["scope_type"] == "scenario"
+    assert registration["scope_value"] == summary["evaluation"]["primary_scope"]
+
+
+def test_verified_backtest_chart_series_is_complete_finite_and_consistent() -> None:
+    frame = load_verified_backtest_chart_series(active_f6_package(predictor()))
+    required_columns = {
+        "service_date",
+        "actual_visitors",
+        "point_prediction",
+        "q80_prediction",
+        "absolute_error",
+        "model_segment",
+        "service_horizon",
+        "scenario",
+    }
+    numeric_columns = [
+        "actual_visitors",
+        "point_prediction",
+        "q80_prediction",
+        "absolute_error",
+        "service_horizon",
+    ]
+
+    assert required_columns.issubset(frame.columns)
+    assert len(frame) == 322
+    assert frame["service_date"].min() == pd.Timestamp("2023-05-13")
+    assert frame["service_date"].max() == pd.Timestamp("2026-07-12")
+    assert (
+        frame[numeric_columns]
+        .map(lambda value: float("-inf") < value < float("inf"))
+        .all()
+        .all()
+    )
+    assert frame["absolute_error"].to_numpy() == pytest.approx(
+        (frame["point_prediction"] - frame["actual_visitors"]).abs().to_numpy()
+    )
+    assert set(frame["model_segment"]) == {"sat", "sun"}
+    assert set(frame["scenario"]) == {"S3_next_service"}
+    assert frame["service_date"].is_monotonic_increasing
+
+
+def test_verified_backtest_chart_loader_does_not_read_ignored_sources() -> None:
+    with patch(
+        "src.f6_monitoring._verified_source_path",
+        side_effect=AssertionError("runtime attempted to read ignored research artifacts"),
+    ):
+        frame = load_verified_backtest_chart_series(active_f6_package(predictor()))
+
+    assert len(frame) == 322
+
+
+@pytest.mark.skipif(
+    not CHART_RESEARCH_PREDICTIONS.is_file(),
+    reason="Ignored research artifacts are not available in this checkout.",
+)
+def test_tracked_chart_rows_match_optional_authoritative_predictions() -> None:
+    source = pd.read_csv(CHART_RESEARCH_PREDICTIONS)
+    expected = source[
+        source["feature_set_id"].eq(FEATURE_SET_ID)
+        & source["training_window_id"].eq("TW_EXPANDING")
+        & source["sample_weight_id"].eq("SW_UNIFORM")
+        & source["calibration_policy_id"].eq(POLICY_ID)
+        & source["scenario"].eq("S3_next_service")
+    ][
+        [
+            "target_date",
+            "actual",
+            "point_prediction",
+            "raw_quantile_prediction",
+            "absolute_error",
+            "model_segment",
+            "service_horizon",
+            "scenario",
+        ]
+    ].rename(
+        columns={
+            "target_date": "service_date",
+            "actual": "actual_visitors",
+            "raw_quantile_prediction": "q80_prediction",
+        }
+    )
+    actual = pd.read_csv(BACKTEST_CHART)
+
+    pd.testing.assert_frame_equal(
+        actual.reset_index(drop=True),
+        expected.reset_index(drop=True),
+    )
+
+
+def test_verified_backtest_chart_rejects_missing_tracked_csv(
+    tmp_path: Path, monkeypatch
+) -> None:
+    summary_path, chart_path = temporary_backtest_bundle(tmp_path, monkeypatch)
+    chart_path.unlink()
+
+    with pytest.raises(BacktestChartError, match="dataset is missing"):
+        load_verified_backtest_chart_series(
+            active_f6_package(predictor()), summary_path=summary_path
+        )
+
+
+def test_verified_backtest_chart_rejects_hash_mismatch(
+    tmp_path: Path, monkeypatch
+) -> None:
+    summary_path, chart_path = temporary_backtest_bundle(tmp_path, monkeypatch)
+    chart_path.write_bytes(chart_path.read_bytes() + b"\n")
+
+    with pytest.raises(BacktestChartError, match="hash does not match"):
+        load_verified_backtest_chart_series(
+            active_f6_package(predictor()), summary_path=summary_path
+        )
+
+
+def test_verified_backtest_chart_rejects_summary_for_another_package(
+    tmp_path: Path, monkeypatch
+) -> None:
+    summary_path, _ = temporary_backtest_bundle(tmp_path, monkeypatch)
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["package_id"] = "another-f6-package-v1"
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+
+    with pytest.raises(BacktestChartError, match="package binding"):
+        load_verified_backtest_chart_series(
+            active_f6_package(predictor()), summary_path=summary_path
+        )
 
 
 def _temporary_source_verification_fixture(

@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 import pandas as pd
 import pytest
+import streamlit as st
 from streamlit.testing.v1 import AppTest
 
 from src.f6_readiness import prediction_signature
@@ -272,12 +273,23 @@ def _configure_common_patches(
     f6: bool,
     prediction_rows: list[dict[str, Any]] | None = None,
     attendance_frame: pd.DataFrame | None = None,
+    recent_attendance_frame: pd.DataFrame | None = None,
+    recent_attendance_requests: list[tuple[str, int]] | None = None,
     retrain_state: dict[str, Any] | None = None,
     latest_run: dict[str, Any] | None = None,
     latest_successful_run: dict[str, Any] | None = None,
 ) -> None:
     users = [user]
     attendance = ATTENDANCE if attendance_frame is None else attendance_frame
+    recent_attendance = (
+        attendance if recent_attendance_frame is None else recent_attendance_frame
+    )
+
+    def load_recent(location: str, limit: int = 5) -> pd.DataFrame:
+        if recent_attendance_requests is not None:
+            recent_attendance_requests.append((location, limit))
+        return recent_attendance.copy()
+
     stack.enter_context(
         patch.dict(
             "os.environ",
@@ -328,7 +340,7 @@ def _configure_common_patches(
         patch("src.data_admin.load_clean_data", return_value=attendance.copy())
     )
     stack.enter_context(
-        patch("src.data_admin.load_recent_attendance", return_value=attendance.copy())
+        patch("src.data_admin.load_recent_attendance", side_effect=load_recent)
     )
     stack.enter_context(
         patch("src.data_admin.latest_staff_created_attendance", return_value=None)
@@ -536,6 +548,42 @@ def _run_admin_monitoring_ui(
     return app
 
 
+def _run_staff_recent_attendance_ui(
+    recent_attendance: pd.DataFrame,
+) -> tuple[AppTest, list[tuple[str, int]], list[int | str]]:
+    saved_logs: list[tuple[Any, ...]] = []
+    requests: list[tuple[str, int]] = []
+    dataframe_heights: list[int | str] = []
+    with TemporaryDirectory() as artifact_directory, ExitStack() as stack:
+        _configure_common_patches(
+            stack,
+            user=_user("staff"),
+            model_path=ACTIVE_MODEL,
+            artifact_dir=Path(artifact_directory),
+            saved_logs=saved_logs,
+            f6=True,
+            recent_attendance_frame=recent_attendance,
+            recent_attendance_requests=requests,
+        )
+        original_dataframe = st.dataframe
+
+        def capture_dataframe(*args: Any, **kwargs: Any):
+            dataframe_heights.append(kwargs.get("height", "auto"))
+            return original_dataframe(*args, **kwargs)
+
+        stack.enter_context(
+            patch("streamlit.dataframe", side_effect=capture_dataframe)
+        )
+        app = AppTest.from_file(str(ROOT / "app_staff.py"), default_timeout=60)
+        app.session_state["user"] = {"username": "staff-test"}
+        app.run()
+
+    assert not app.exception
+    assert not app.error
+    assert saved_logs == []
+    return app, requests, dataframe_heights
+
+
 def _metric_values(app: AppTest) -> dict[str, str]:
     return {str(element.label): str(element.value) for element in app.metric}
 
@@ -546,6 +594,79 @@ def _rendered_dataframe(app: AppTest, required_columns: set[str]) -> pd.DataFram
         if isinstance(value, pd.DataFrame) and required_columns.issubset(value.columns):
             return value
     raise AssertionError(f"No rendered dataframe has columns {sorted(required_columns)}")
+
+
+def _rendered_dataframe_element(app: AppTest, required_columns: set[str]):
+    for element in app.dataframe:
+        value = element.value
+        if isinstance(value, pd.DataFrame) and required_columns.issubset(value.columns):
+            return element
+    raise AssertionError(f"No rendered dataframe has columns {sorted(required_columns)}")
+
+
+def test_staff_recent_attendance_requests_and_displays_latest_seven() -> None:
+    attendance = pd.DataFrame(
+        {
+            "service_date": pd.to_datetime(
+                [
+                    "2026-07-05",
+                    "2026-06-14",
+                    "2026-07-19",
+                    "2026-06-21",
+                    "2026-07-12",
+                    "2026-05-31",
+                    "2026-06-28",
+                    "2026-05-24",
+                    "2026-05-17",
+                ]
+            ),
+            "visitors": [105, 98, 120, 101, 112, 93, 104, 90, 88],
+        }
+    )
+
+    app, requests, dataframe_heights = _run_staff_recent_attendance_ui(attendance)
+    element = _rendered_dataframe_element(
+        app, {"Service date", "Actual visitors served"}
+    )
+    rendered = element.value
+
+    assert requests == [("ny_12550", 7)]
+    assert len(rendered) == 7
+    assert rendered["Service date"].tolist() == [
+        "2026-07-19",
+        "2026-07-12",
+        "2026-07-05",
+        "2026-06-28",
+        "2026-06-21",
+        "2026-06-14",
+        "2026-05-31",
+    ]
+    assert dataframe_heights == [283]
+
+
+def test_staff_recent_attendance_renders_fewer_rows_without_blank_space() -> None:
+    attendance = pd.DataFrame(
+        {
+            "service_date": pd.to_datetime(
+                ["2026-07-05", "2026-07-19", "2026-07-12"]
+            ),
+            "visitors": [105, 120, 112],
+        }
+    )
+
+    app, requests, dataframe_heights = _run_staff_recent_attendance_ui(attendance)
+    element = _rendered_dataframe_element(
+        app, {"Service date", "Actual visitors served"}
+    )
+    rendered = element.value
+
+    assert requests == [("ny_12550", 7)]
+    assert rendered["Service date"].tolist() == [
+        "2026-07-19",
+        "2026-07-12",
+        "2026-07-05",
+    ]
+    assert dataframe_heights == [143]
 
 
 @pytest.mark.parametrize("app_filename,role", [("app.py", "master"), ("app_staff.py", "staff")])

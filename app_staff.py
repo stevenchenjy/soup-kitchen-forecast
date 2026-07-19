@@ -186,7 +186,7 @@ if st.button("Add / Update"):
             st.success("Saved.")
 
 try:
-    recent_attendance = load_recent_attendance(location_id, limit=5)
+    recent_attendance = load_recent_attendance(location_id, limit=7)
 except (TimeoutError, URLError, HTTPError):
     recent_attendance = None
     st.warning(ATTENDANCE_UNAVAILABLE_MESSAGE)
@@ -197,9 +197,16 @@ except Exception:
 if recent_attendance is not None and not recent_attendance.empty:
     st.markdown("**Recent visitor counts**")
     recent_df = recent_attendance[["service_date", TARGET_COL]].copy()
+    recent_df = recent_df.sort_values("service_date", ascending=False).head(7)
     recent_df["service_date"] = recent_df["service_date"].dt.strftime("%Y-%m-%d")
     recent_df = recent_df.rename(columns={"service_date": "Service date", TARGET_COL: "Actual visitors served"})
-    st.dataframe(recent_df, use_container_width=True, hide_index=True, height=300)
+    recent_table_height = min(38 + (35 * len(recent_df)), 283)
+    st.dataframe(
+        recent_df,
+        use_container_width=True,
+        hide_index=True,
+        height=recent_table_height,
+    )
 
 with st.expander("View full attendance history", expanded=False):
     history_key = f"staff_full_history_{location_id}"

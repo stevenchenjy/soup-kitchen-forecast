@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -30,6 +31,14 @@ PACKAGE_ID = "ny_12550_f6_2026-07-12_v1"
 FEATURE_SET_ID = "F6_COMPACT_SELECTED"
 POLICY_ID = "C0_EXISTING_RAW_QUANTILE"
 ROOT = Path(__file__).resolve().parents[1]
+POINT_RESEARCH_METRICS = (
+    ROOT
+    / "artifacts/ny_12550/model_optimization/phase2b1_training_windows/06_training_window_metrics.csv"
+)
+OPERATIONAL_RESEARCH_METRICS = (
+    ROOT
+    / "artifacts/ny_12550/model_optimization/phase2c_lite_calibration/10_daytype_scenario_horizon.csv"
+)
 
 
 def predictor(package_id: str = PACKAGE_ID, **overrides):
@@ -228,6 +237,21 @@ def test_verified_backtest_summary_loads_exact_active_package_metrics() -> None:
     assert summary["metrics"]["median_absolute_error"] == pytest.approx(
         10.253146148989984
     )
+    assert summary["metrics"]["mean_signed_error"] == pytest.approx(
+        0.22609781014812802
+    )
+    assert summary["metrics"]["underprediction_rate"] == pytest.approx(
+        0.577639751552795
+    )
+    assert summary["metrics"]["q80_empirical_coverage"] == pytest.approx(
+        0.6832298136645962
+    )
+    assert summary["metrics"]["mean_over_preparation"] == pytest.approx(
+        12.341614906832298
+    )
+    assert summary["metrics"]["mean_under_preparation"] == pytest.approx(
+        3.1335403726708075
+    )
     assert summary["segments"]["Saturday"]["mae"] == pytest.approx(
         13.622258066963107
     )
@@ -255,12 +279,83 @@ def test_verified_backtest_summary_loads_without_deployed_source_artifacts(
     assert summary["package_id"] == PACKAGE_ID
 
 
-def test_verified_backtest_source_files_and_hashes_can_be_checked_explicitly() -> None:
-    summary = load_verified_backtest_summary(
-        active_f6_package(predictor()), verify_sources=True
+def _temporary_source_verification_fixture(
+    tmp_path: Path,
+) -> tuple[Path, list[Path]]:
+    tracked_summary = (
+        ROOT / "config/model_backtests/ny_12550_f6_2026-07-12_v1.json"
     )
+    summary = json.loads(tracked_summary.read_text(encoding="utf-8"))
+    sources: list[Path] = []
+    source_records: list[dict[str, str]] = []
+    for name, contents in (
+        ("point_metrics.csv", "scope,mae\nS3_next_service,13.63\n"),
+        ("operational_metrics.csv", "scope,mean_over_preparation\nS3_next_service,12.34\n"),
+    ):
+        source = tmp_path / "synthetic_sources" / name
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(contents, encoding="utf-8")
+        sources.append(source)
+        source_records.append(
+            {
+                "path": source.relative_to(tmp_path).as_posix(),
+                "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                "provides": f"synthetic verification fixture for {name}",
+            }
+        )
+    summary["source_artifacts"] = source_records
+    summary_path = tmp_path / "verified_summary.json"
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+    return summary_path, sources
+
+
+def test_verified_backtest_source_files_and_hashes_can_be_checked_explicitly(
+    tmp_path: Path,
+) -> None:
+    summary_path, _ = _temporary_source_verification_fixture(tmp_path)
+
+    with patch("src.f6_monitoring.PROJECT_ROOT", tmp_path):
+        summary = load_verified_backtest_summary(
+            active_f6_package(predictor()),
+            summary_path=summary_path,
+            verify_sources=True,
+        )
 
     assert summary["verification_status"] == "verified"
+
+
+def test_verified_backtest_source_verification_rejects_missing_file(
+    tmp_path: Path,
+) -> None:
+    summary_path, sources = _temporary_source_verification_fixture(tmp_path)
+    sources[0].unlink()
+
+    with (
+        patch("src.f6_monitoring.PROJECT_ROOT", tmp_path),
+        pytest.raises(BacktestSummaryError, match="source is missing"),
+    ):
+        load_verified_backtest_summary(
+            active_f6_package(predictor()),
+            summary_path=summary_path,
+            verify_sources=True,
+        )
+
+
+def test_verified_backtest_source_verification_rejects_hash_mismatch(
+    tmp_path: Path,
+) -> None:
+    summary_path, sources = _temporary_source_verification_fixture(tmp_path)
+    sources[0].write_text("scope,mae\nchanged,999\n", encoding="utf-8")
+
+    with (
+        patch("src.f6_monitoring.PROJECT_ROOT", tmp_path),
+        pytest.raises(BacktestSummaryError, match="source hash does not match"),
+    ):
+        load_verified_backtest_summary(
+            active_f6_package(predictor()),
+            summary_path=summary_path,
+            verify_sources=True,
+        )
 
 
 @pytest.mark.parametrize(
@@ -287,7 +382,7 @@ def test_verified_backtest_summary_remains_bound_to_active_contract(
         )
 
 
-def test_verified_backtest_summary_values_match_authoritative_artifacts() -> None:
+def test_verified_backtest_summary_matches_tracked_candidate_metadata() -> None:
     summary = load_verified_backtest_summary(active_f6_package(predictor()))
     metadata = json.loads(
         (
@@ -295,25 +390,27 @@ def test_verified_backtest_summary_values_match_authoritative_artifacts() -> Non
             / "models/candidates/ny_12550_f6_2026-07-12_v1/metadata.json"
         ).read_text(encoding="utf-8")
     )
-    point_metrics = pd.read_csv(
-        ROOT
-        / "artifacts/ny_12550/model_optimization/phase2b1_training_windows/06_training_window_metrics.csv"
-    )
-    operational_metrics = pd.read_csv(
-        ROOT
-        / "artifacts/ny_12550/model_optimization/phase2c_lite_calibration/10_daytype_scenario_horizon.csv"
-    )
-    primary = point_metrics[
-        point_metrics["training_window_id"].eq("TW_EXPANDING")
-        & point_metrics["evaluation_scope"].eq("scenario")
-        & point_metrics["scope_value"].eq("S3_next_service")
-    ].iloc[0]
-    preparation = operational_metrics[
-        operational_metrics["calibration_policy_id"].eq(POLICY_ID)
-        & operational_metrics["scope_type"].eq("scenario")
-        & operational_metrics["scope_value"].eq("S3_next_service")
-    ].iloc[0]
 
+    assert summary["package_id"] == metadata["package_id"]
+    assert (
+        summary["model_package_schema_version"]
+        == metadata["model_package_schema_version"]
+    )
+    assert summary["feature_set_id"] == metadata["feature_contract"]["feature_set_id"]
+    assert (
+        summary["feature_order_sha256"]
+        == metadata["feature_contract"]["feature_order_sha256"]
+    )
+    assert (
+        summary["recommendation_policy_id"]
+        == metadata["recommendation_policy_id"]
+    )
+    assert summary["attendance_cutoff"] == metadata["attendance_input"][
+        "maximum_service_date"
+    ]
+    assert summary["evaluation"]["row_count"] == metadata["metrics"]["overall"][
+        "BacktestRows"
+    ]
     assert summary["metrics"]["mae"] == pytest.approx(
         metadata["metrics"]["overall"]["MAE"]
     )
@@ -326,6 +423,28 @@ def test_verified_backtest_summary_values_match_authoritative_artifacts() -> Non
     assert summary["segments"]["Sunday"]["mae"] == pytest.approx(
         metadata["metrics"]["sun"]["MAE"]
     )
+
+
+@pytest.mark.skipif(
+    not POINT_RESEARCH_METRICS.is_file()
+    or not OPERATIONAL_RESEARCH_METRICS.is_file(),
+    reason="Ignored research artifacts are not available in this checkout.",
+)
+def test_verified_backtest_summary_matches_optional_research_artifacts() -> None:
+    summary = load_verified_backtest_summary(active_f6_package(predictor()))
+    point_metrics = pd.read_csv(POINT_RESEARCH_METRICS)
+    operational_metrics = pd.read_csv(OPERATIONAL_RESEARCH_METRICS)
+    primary = point_metrics[
+        point_metrics["training_window_id"].eq("TW_EXPANDING")
+        & point_metrics["evaluation_scope"].eq("scenario")
+        & point_metrics["scope_value"].eq("S3_next_service")
+    ].iloc[0]
+    preparation = operational_metrics[
+        operational_metrics["calibration_policy_id"].eq(POLICY_ID)
+        & operational_metrics["scope_type"].eq("scenario")
+        & operational_metrics["scope_value"].eq("S3_next_service")
+    ].iloc[0]
+
     assert summary["metrics"]["median_absolute_error"] == pytest.approx(
         primary["median_absolute_error"]
     )

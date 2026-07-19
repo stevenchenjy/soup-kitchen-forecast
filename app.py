@@ -32,7 +32,9 @@ from src.f6_monitoring import (
     build_operational_impact,
     build_f6_monitoring_report,
     f6_training_status,
+    format_dashboard_date,
     load_verified_backtest_summary,
+    retraining_status_label,
 )
 from src.location_config import save_locations, list_locations
 from src.model_training_runs import (
@@ -198,17 +200,30 @@ def render_model_monitoring():
         st.caption(f6_integrity_error or "The active F6 contract is unavailable.")
         return
 
+    try:
+        backtest = load_verified_backtest_summary(active_package)
+    except BacktestSummaryError as exc:
+        backtest = None
+        backtest_error = exc
+    else:
+        backtest_error = None
+
     feature_hash = active_package.feature_order_sha256
+    version = backtest["attendance_cutoff"] if backtest is not None else "Unavailable"
     st.markdown("### Active Model")
-    p1, p2, p3, p4 = st.columns(4)
-    p1.metric("Package ID", active_package.package_id)
-    p2.metric("Schema Version", active_package.schema_version)
-    p3.metric("Feature Set", active_package.feature_set_id)
-    p4.metric("Recommendation Policy", active_package.recommendation_policy_id)
-    st.caption(
-        f"Feature hash: {feature_hash[:12]}…{feature_hash[-8:]} · "
-        f"{active_package.feature_count} features · raw Q80"
+    st.success(
+        f"Forecast model active · Version {version} · Raw Q80 recommendation"
     )
+    with st.expander("Technical details", expanded=False):
+        st.markdown(f"**Package ID:** `{active_package.package_id}`")
+        st.markdown(f"**Schema Version:** {active_package.schema_version}")
+        st.markdown(f"**Feature Set:** `{active_package.feature_set_id}`")
+        st.markdown(
+            f"**Feature hash:** `{feature_hash[:12]}…{feature_hash[-8:]}`"
+        )
+        st.markdown(
+            f"**Recommendation Policy:** `{active_package.recommendation_policy_id}`"
+        )
 
     def number(value):
         return "—" if value is None else f"{value:.2f}"
@@ -217,11 +232,8 @@ def render_model_monitoring():
         return "—" if value is None else f"{value * 100:.1f}%"
 
     st.markdown("### Model Performance")
-    try:
-        backtest = load_verified_backtest_summary(active_package)
-    except BacktestSummaryError as exc:
-        backtest = None
-        st.error(f"Verified historical backtest unavailable: {exc}")
+    if backtest_error is not None:
+        st.error(f"Verified historical backtest unavailable: {backtest_error}")
     if backtest is not None:
         metrics = backtest["metrics"]
         cutoff = date.fromisoformat(backtest["attendance_cutoff"])
@@ -267,47 +279,47 @@ def render_model_monitoring():
             report = None
 
     if report is not None:
-        stage_labels = {
-            "INSUFFICIENT_DATA": "Insufficient data",
-            "EARLY_SIGNAL": "Early signal",
-            "INITIAL_REVIEW": "Initial review",
-            "STABLE_REVIEW": "Stable review",
-        }
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Production Predictions", report["prediction_count"])
-        c2.metric("Reconciled Predictions", report["reconciled_count"])
-        c3.metric("Unreconciled Predictions", report["unreconciled_count"])
-        c4.metric("Monitoring Stage", stage_labels[report["stage"]])
-
-        live_metrics = report["metrics"]
-        if report["reconciled_count"] <= 3:
-            st.info(
-                "Insufficient production data. Live metrics will appear after actual attendance is recorded."
-            )
+        if report["prediction_count"] == 0:
+            st.info("No live production predictions are available yet.")
         else:
-            l1, l2, l3, l4 = st.columns(4)
-            l1.metric("Live MAE", number(live_metrics["mae"]))
-            l2.metric("Live RMSE", number(live_metrics["rmse"]))
-            l3.metric("Live Mean Signed Error", number(live_metrics["mean_signed_error"]))
-            l4.metric("Live Underprediction Rate", rate(live_metrics["underprediction_rate"]))
-            l5, l6, l7 = st.columns(3)
-            l5.metric("Live Q80 Coverage", rate(live_metrics["q80_empirical_coverage"]))
-            l6.metric("Live Mean Over-Preparation", number(live_metrics["mean_over_preparation"]))
-            l7.metric("Live Mean Under-Preparation", number(live_metrics["mean_under_preparation"]))
+            stage_labels = {
+                "INSUFFICIENT_DATA": "Insufficient data",
+                "EARLY_SIGNAL": "Early signal",
+                "INITIAL_REVIEW": "Initial review",
+                "STABLE_REVIEW": "Stable review",
+            }
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Production Predictions", report["prediction_count"])
+            c2.metric("Reconciled Predictions", report["reconciled_count"])
+            c3.metric("Unreconciled Predictions", report["unreconciled_count"])
+            c4.metric("Monitoring Stage", stage_labels[report["stage"]])
 
-        if report["integrity_alerts"]:
-            st.markdown("**Integrity Alerts**")
-            for message in report["integrity_alerts"]:
-                st.warning(message)
-        if report["reconciled_count"] >= 4 and report["performance_alerts"]:
-            st.markdown("**Performance Alerts**")
-            for message in report["performance_alerts"]:
-                st.warning(message)
+            live_metrics = report["metrics"]
+            if report["reconciled_count"] <= 3:
+                st.info(
+                    "Insufficient production data. Live metrics will appear after actual attendance is recorded."
+                )
+            else:
+                l1, l2, l3, l4 = st.columns(4)
+                l1.metric("Live MAE", number(live_metrics["mae"]))
+                l2.metric("Live RMSE", number(live_metrics["rmse"]))
+                l3.metric("Live Mean Signed Error", number(live_metrics["mean_signed_error"]))
+                l4.metric("Live Underprediction Rate", rate(live_metrics["underprediction_rate"]))
+                l5, l6, l7 = st.columns(3)
+                l5.metric("Live Q80 Coverage", rate(live_metrics["q80_empirical_coverage"]))
+                l6.metric("Live Mean Over-Preparation", number(live_metrics["mean_over_preparation"]))
+                l7.metric("Live Mean Under-Preparation", number(live_metrics["mean_under_preparation"]))
 
-        st.markdown("**Latest Production Outcomes**")
-        if not report["latest_outcomes"]:
-            st.info("No active-model production predictions are available yet.")
-        else:
+            if report["integrity_alerts"]:
+                st.markdown("**Integrity Alerts**")
+                for message in report["integrity_alerts"]:
+                    st.warning(message)
+            if report["reconciled_count"] >= 4 and report["performance_alerts"]:
+                st.markdown("**Performance Alerts**")
+                for message in report["performance_alerts"]:
+                    st.warning(message)
+
+            st.markdown("**Latest Production Outcomes**")
             outcome_rows = []
             for row in report["latest_outcomes"]:
                 predicted = row.get("predicted_visitors")
@@ -389,17 +401,15 @@ def render_model_monitoring():
         training = None
         st.warning(f"Training status could not be loaded: {exc}")
     if training is not None:
-        t1, t2, t3, t4 = st.columns(4)
-        t1.metric("Needs Retraining", "Yes" if training["needs_retraining"] else "No")
-        t2.metric(
-            "Last Attendance Update",
-            (retrain_state or {}).get("last_attendance_updated_at") or "—",
+        t1, t2, t3 = st.columns(3)
+        t1.caption("Needs Retraining")
+        t1.markdown(f"**{'Yes' if training['needs_retraining'] else 'No'}**")
+        t2.caption("Last Attendance Update")
+        t2.markdown(
+            f"**{format_dashboard_date((retrain_state or {}).get('last_attendance_updated_at'))}**"
         )
-        t3.metric(
-            "Last Successful Training",
-            training["latest_successful_at"] or "—",
-        )
-        t4.metric("Retraining Status", training["status"])
+        t3.caption("Retraining Status")
+        t3.markdown(f"**{retraining_status_label(training['status'])}**")
         st.info(training["message"])
 
 

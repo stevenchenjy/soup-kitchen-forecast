@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import date
+from datetime import date, datetime
 import hashlib
 import json
 import math
@@ -162,9 +162,14 @@ def load_verified_backtest_summary(
     contract: ActiveF6Package,
     *,
     summary_path: str | Path | None = None,
-    verify_sources: bool = True,
+    verify_sources: bool = False,
 ) -> dict[str, Any]:
-    """Load a package-bound historical backtest summary and verify its provenance."""
+    """Load a package-bound historical summary, optionally checking source files.
+
+    The tracked summary is the production runtime artifact. Its source-artifact
+    records are provenance, while source existence and hashes are an opt-in
+    generation/CI check because ignored research artifacts are not deployed.
+    """
 
     if summary_path is None:
         if Path(contract.package_id).name != contract.package_id:
@@ -237,6 +242,33 @@ def load_verified_backtest_summary(
                     f"Verified backtest source hash does not match: {source.name}"
                 )
     return summary
+
+
+def format_dashboard_date(value: Any) -> str:
+    """Format a date or timestamp compactly for dashboard metric cards."""
+
+    raw = str(value or "").strip()
+    if not raw:
+        return "—"
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00")).date()
+    except ValueError:
+        try:
+            parsed = date.fromisoformat(raw)
+        except ValueError:
+            return "—"
+    return f"{parsed.strftime('%b')} {parsed.day}, {parsed.year}"
+
+
+def retraining_status_label(value: Any) -> str:
+    """Map internal retraining states to short administrator-facing labels."""
+
+    return {
+        "PENDING_FIRST_F6_RETRAIN": "Pending first retrain",
+        "RETRAINING_REQUIRED": "Retraining required",
+        "SUCCESS": "Up to date",
+        "FAILED": "Last retrain failed",
+    }.get(str(value or "").upper(), "Status unavailable")
 
 
 def build_operational_impact(
@@ -581,9 +613,7 @@ def f6_training_status(
     )
 
     if matching_success is None:
-        message = (
-            "Activated from verified candidate; first genuine production retraining pending."
-        )
+        message = "Activated from verified candidate. First production retraining pending."
         latest_successful_at = None
     else:
         message = "Confirmed production training run available."

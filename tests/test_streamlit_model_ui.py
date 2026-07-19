@@ -242,6 +242,26 @@ def _element_text(app: AppTest) -> str:
     return "\n".join(values)
 
 
+def _tree_text_excluding_expander(app: AppTest, excluded_label: str) -> str:
+    values: list[str] = []
+
+    def visit(node: Any) -> None:
+        if (
+            getattr(node, "type", None) == "expander"
+            and getattr(node, "label", None) == excluded_label
+        ):
+            return
+        for attribute in ("label", "value", "body"):
+            value = getattr(node, attribute, None)
+            if value is not None:
+                values.append(str(value))
+        for child in getattr(node, "children", {}).values():
+            visit(child)
+
+    visit(app.main)
+    return "\n".join(values)
+
+
 def _configure_common_patches(
     stack: ExitStack,
     *,
@@ -449,17 +469,39 @@ def _run_prediction_ui(
 
         rendered_text = _element_text(app)
         assert all(sentinel not in rendered_text for sentinel in SECRET_SENTINELS)
+        technical_expander = next(
+            (
+                element
+                for element in app.expander
+                if element.label == "Technical details"
+            ),
+            None,
+        )
         return {
             "rendered_text": rendered_text,
             "slider_labels": [element.label for element in app.slider],
             "metric_labels": [element.label for element in app.metric],
             "prediction": prediction_signature(logged_prediction),
+            "technical_details": (
+                None
+                if technical_expander is None
+                else {
+                    "expanded": bool(technical_expander.proto.expanded),
+                    "text": "\n".join(
+                        str(element.value) for element in technical_expander.markdown
+                    ),
+                }
+            ),
+            "non_technical_text": _tree_text_excluding_expander(
+                app, "Technical details"
+            ),
         }
 
 
 def _run_admin_monitoring_ui(
     prediction_rows: list[dict[str, Any]],
     *,
+    retrain_state: dict[str, Any] | None = None,
     latest_run: dict[str, Any] | None = None,
     latest_successful_run: dict[str, Any] | None = None,
 ) -> AppTest:
@@ -480,6 +522,7 @@ def _run_admin_monitoring_ui(
             f6=True,
             prediction_rows=prediction_rows,
             attendance_frame=attendance,
+            retrain_state=retrain_state,
             latest_run=latest_run,
             latest_successful_run=latest_successful_run,
         )
@@ -535,10 +578,30 @@ def test_active_f6_admin_and_staff_prediction_paths(
     )
     assert all(term not in text.lower() for term in forbidden)
     if app_filename == "app.py":
-        assert "ny_12550_f6_2026-07-12_v1" in text
-        assert "Schema Version" in text
-        assert "F6_COMPACT_SELECTED" in text
-        assert "C0_EXISTING_RAW_QUANTILE" in text
+        assert (
+            "Forecast model active · Version 2026-07-12 · Raw Q80 recommendation"
+            in text
+        )
+        details = result["technical_details"]
+        assert details is not None
+        assert details["expanded"] is False
+        assert "ny_12550_f6_2026-07-12_v1" in details["text"]
+        assert "Schema Version" in details["text"]
+        assert "F6_COMPACT_SELECTED" in details["text"]
+        assert "dac868ae1a73…607f7419" in details["text"]
+        assert "C0_EXISTING_RAW_QUANTILE" in details["text"]
+        assert "ny_12550_f6_2026-07-12_v1" not in result["non_technical_text"]
+        assert "F6_COMPACT_SELECTED" not in result["non_technical_text"]
+        assert "C0_EXISTING_RAW_QUANTILE" not in result["non_technical_text"]
+        assert all(
+            label not in result["metric_labels"]
+            for label in (
+                "Package ID",
+                "Schema Version",
+                "Feature Set",
+                "Recommendation Policy",
+            )
+        )
         assert "Recommended meals" in result["metric_labels"]
     else:
         assert "Recommended meals" in result["metric_labels"]
@@ -574,6 +637,10 @@ def test_admin_monitoring_separates_backtest_live_and_operational_scopes() -> No
     rows = all_rows[:10] + [all_rows[10], all_rows[11], all_rows[13]]
     app = _run_admin_monitoring_ui(
         rows,
+        retrain_state={
+            "dirty": False,
+            "last_attendance_updated_at": "2026-07-12T18:42:11+00:00",
+        },
         latest_run=old_run,
         latest_successful_run=old_run,
     )
@@ -600,6 +667,13 @@ def test_admin_monitoring_separates_backtest_live_and_operational_scopes() -> No
     assert metrics["Logs Reconciled with Actuals"] == "12"
     assert metrics["Estimated Food Saved"] == "251.0 meals"
     assert metrics["Estimated CO₂e Reduction"] == "429.2 kg"
+    assert "Last Attendance Update" not in metrics
+    assert "Retraining Status" not in metrics
+    assert "Last Successful Training" not in metrics
+    assert "Package ID" not in metrics
+    assert "Schema Version" not in metrics
+    assert "Feature Set" not in metrics
+    assert "Recommendation Policy" not in metrics
 
     text = _element_text(app)
     assert "Model Performance" in text
@@ -607,10 +681,16 @@ def test_admin_monitoring_separates_backtest_live_and_operational_scopes() -> No
     assert "Operational Impact" in text
     assert "Origin-aware historical backtest using attendance through July 12, 2026." in text
     assert (
-        "Activated from verified candidate; first genuine production retraining pending."
+        "Activated from verified candidate. First production retraining pending."
         in text
     )
     assert "2026-07-13T10:21:30+00:00" not in text
+    assert "2026-07-12T18:42:11+00:00" not in text
+    assert "PENDING_FIRST_F6_RETRAIN" not in text
+    assert "Last Attendance Update" in text
+    assert "Jul 12, 2026" in text
+    assert "Retraining Status" in text
+    assert "Pending first retrain" in text
     assert "999.0" not in text
     assert "Live MAE" not in metrics
     assert "MAPE" not in metrics
@@ -672,25 +752,40 @@ def test_admin_monitoring_zero_live_rows_keeps_backtest_and_cumulative_impact() 
     metrics = _metric_values(app)
     assert metrics["MAE"] == "13.63"
     assert metrics["RMSE"] == "17.74"
-    assert metrics["Production Predictions"] == "0"
-    assert metrics["Reconciled Predictions"] == "0"
-    assert metrics["Unreconciled Predictions"] == "0"
-    assert metrics["Monitoring Stage"] == "Insufficient data"
+    assert "Production Predictions" not in metrics
+    assert "Reconciled Predictions" not in metrics
+    assert "Unreconciled Predictions" not in metrics
+    assert "Monitoring Stage" not in metrics
     assert metrics["Attendance Rows"] == "360"
     assert metrics["Total Prediction Logs"] == "10"
     assert metrics["Logs Reconciled with Actuals"] == "10"
     assert metrics["Estimated Food Saved"] == "216.0 meals"
     assert metrics["Estimated CO₂e Reduction"] == "369.4 kg"
     text = _element_text(app)
+    assert "No live production predictions are available yet." in text
     assert (
         "Insufficient production data. Live metrics will appear after actual attendance is recorded."
-        in text
+        not in text
     )
-    assert "No active-model production predictions are available yet." in text
+    assert "Latest Production Outcomes" not in text
     assert "Model Performance" in text
     assert "F6-only performance" not in text
     assert not [label for label in metrics if label.startswith("F6")]
     assert "fallback" not in text.lower()
+
+
+def test_admin_monitoring_clean_deployment_uses_tracked_backtest_summary() -> None:
+    with patch(
+        "src.f6_monitoring._verified_source_path",
+        side_effect=AssertionError("deployment attempted to read research artifacts"),
+    ):
+        app = _run_admin_monitoring_ui(_mixed_history_rows()[:10])
+
+    metrics = _metric_values(app)
+    assert metrics["MAE"] == "13.63"
+    assert metrics["RMSE"] == "17.74"
+    assert not app.error
+    assert "Verified historical backtest unavailable" not in _element_text(app)
 
 
 @pytest.mark.parametrize("app_filename,role", [("app.py", "master"), ("app_staff.py", "staff")])

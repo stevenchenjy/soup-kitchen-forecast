@@ -18,8 +18,10 @@ from src.f6_monitoring import (
     build_f6_monitoring_report,
     f6_training_status,
     filter_active_f6_rows,
+    format_dashboard_date,
     load_verified_backtest_summary,
     monitoring_stage,
+    retraining_status_label,
 )
 from src.production_features import LOCKED_F6_FEATURE_ORDER_SHA256
 
@@ -243,6 +245,48 @@ def test_verified_backtest_summary_loads_exact_active_package_metrics() -> None:
     )
 
 
+def test_verified_backtest_summary_loads_without_deployed_source_artifacts(
+    tmp_path: Path,
+) -> None:
+    with patch("src.f6_monitoring.PROJECT_ROOT", tmp_path):
+        summary = load_verified_backtest_summary(active_f6_package(predictor()))
+
+    assert summary["verification_status"] == "verified"
+    assert summary["package_id"] == PACKAGE_ID
+
+
+def test_verified_backtest_source_files_and_hashes_can_be_checked_explicitly() -> None:
+    summary = load_verified_backtest_summary(
+        active_f6_package(predictor()), verify_sources=True
+    )
+
+    assert summary["verification_status"] == "verified"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("package_id", "ny_12550_f6_wrong_v1"),
+        ("feature_order_sha256", "wrong-feature-hash"),
+    ],
+)
+def test_verified_backtest_summary_remains_bound_to_active_contract(
+    tmp_path: Path,
+    field: str,
+    value: str,
+) -> None:
+    source = ROOT / "config/model_backtests/ny_12550_f6_2026-07-12_v1.json"
+    summary = json.loads(source.read_text(encoding="utf-8"))
+    summary[field] = value
+    modified = tmp_path / "modified-summary.json"
+    modified.write_text(json.dumps(summary), encoding="utf-8")
+
+    with pytest.raises(BacktestSummaryError, match=field):
+        load_verified_backtest_summary(
+            active_f6_package(predictor()), summary_path=modified
+        )
+
+
 def test_verified_backtest_summary_values_match_authoritative_artifacts() -> None:
     summary = load_verified_backtest_summary(active_f6_package(predictor()))
     metadata = json.loads(
@@ -397,8 +441,43 @@ def test_legacy_training_timestamp_is_not_presented_as_f6_training_time() -> Non
     assert status["latest_successful_at"] is None
     assert status["status"] == "PENDING_FIRST_F6_RETRAIN"
     assert status["message"] == (
-        "Activated from verified candidate; first genuine production retraining pending."
+        "Activated from verified candidate. First production retraining pending."
     )
+
+
+@pytest.mark.parametrize(
+    ("status", "label"),
+    [
+        ("PENDING_FIRST_F6_RETRAIN", "Pending first retrain"),
+        ("RETRAINING_REQUIRED", "Retraining required"),
+        ("SUCCESS", "Up to date"),
+        ("FAILED", "Last retrain failed"),
+        ("unexpected_internal_value", "Status unavailable"),
+        (None, "Status unavailable"),
+    ],
+)
+def test_retraining_status_labels_are_plain_language(
+    status: str | None,
+    label: str,
+) -> None:
+    assert retraining_status_label(status) == label
+
+
+@pytest.mark.parametrize(
+    ("value", "formatted"),
+    [
+        ("2026-07-12", "Jul 12, 2026"),
+        ("2026-07-12T18:42:11+00:00", "Jul 12, 2026"),
+        ("2026-07-12T18:42:11Z", "Jul 12, 2026"),
+        (None, "—"),
+        ("not-a-date", "—"),
+    ],
+)
+def test_dashboard_dates_are_compact_and_readable(
+    value: str | None,
+    formatted: str,
+) -> None:
+    assert format_dashboard_date(value) == formatted
 
 
 def test_confirmed_active_f6_training_run_is_shown() -> None:

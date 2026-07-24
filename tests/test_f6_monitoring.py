@@ -638,10 +638,20 @@ def test_verified_backtest_summary_matches_optional_research_artifacts() -> None
         )
 
 
-def test_verified_backtest_summary_rejects_another_active_package() -> None:
+def test_verified_backtest_summary_uses_registered_reference_for_nightly_lineage() -> None:
+    summary = load_verified_backtest_summary(
+        active_f6_package(predictor("ny_12550_f6_nightly_2026-07-19_v1"))
+    )
+
+    assert summary["is_reference_backtest"] is True
+    assert summary["package_id"] == PACKAGE_ID
+    assert summary["active_package_id"] == "ny_12550_f6_nightly_2026-07-19_v1"
+
+
+def test_verified_backtest_summary_rejects_unregistered_active_package() -> None:
     with pytest.raises(BacktestSummaryError, match="No verified historical backtest"):
         load_verified_backtest_summary(
-            active_f6_package(predictor("ny_12550_f6_nightly_2026-07-19_v1"))
+            active_f6_package(predictor("unregistered_f6_package_v1"))
         )
 
 
@@ -724,7 +734,7 @@ def test_legacy_training_timestamp_is_not_presented_as_f6_training_time() -> Non
     assert status["latest_successful_at"] is None
     assert status["status"] == "PENDING_FIRST_F6_RETRAIN"
     assert status["message"] == (
-        "Activated from verified candidate. First production retraining pending."
+        "Verified candidate active. First production retraining has not completed."
     )
 
 
@@ -735,6 +745,7 @@ def test_legacy_training_timestamp_is_not_presented_as_f6_training_time() -> Non
         ("RETRAINING_REQUIRED", "Retraining required"),
         ("SUCCESS", "Up to date"),
         ("FAILED", "Last retrain failed"),
+        ("DEPLOYMENT_MISMATCH", "Configuration mismatch"),
         ("unexpected_internal_value", "Status unavailable"),
         (None, "Status unavailable"),
     ],

@@ -1,0 +1,13 @@
+{
+  "registry_schema_version": 1,
+  "references": [
+    {
+      "package_id_prefix": "ny_12550_f6_nightly_",
+      "feature_set_id": "F6_COMPACT_SELECTED",
+      "feature_order_sha256": "dac868ae1a739cbee55443a953c6ab5c45876e158e40b57300ffe1c9607f7419",
+      "recommendation_policy_id": "C0_EXISTING_RAW_QUANTILE",
+      "reference_package_id": "ny_12550_f6_2026-07-12_v1",
+      "summary_path": "config/model_backtests/ny_12550_f6_2026-07-12_v1.json"
+    }
+  ]
+}

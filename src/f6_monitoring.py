@@ -24,6 +24,7 @@ from src.production_features import (
 
 TRAINING_PROVENANCE_KEY = "_f6_package_provenance"
 VERIFIED_BACKTEST_DIR = PROJECT_ROOT / "config" / "model_backtests"
+VERIFIED_BACKTEST_REGISTRY = VERIFIED_BACKTEST_DIR / "registry.json"
 _BACKTEST_METRIC_KEYS = {
     "mae",
     "median_absolute_error",
@@ -44,6 +45,7 @@ class ActiveF6Package:
     feature_count: int
     feature_order_sha256: str
     recommendation_policy_id: str
+    training_cutoff: str | None
 
 
 class F6IntegrityError(ValueError):
@@ -80,6 +82,12 @@ def active_f6_package(predictor: Any) -> ActiveF6Package:
     )
     feature_count = len(getattr(predictor, "feature_cols", ()))
     package_id = str(getattr(predictor, "package_id", "") or "")
+    history = getattr(predictor, "history_df", None)
+    training_cutoff = None
+    if isinstance(history, pd.DataFrame) and not history.empty and "service_date" in history:
+        parsed_history_dates = pd.to_datetime(history["service_date"], errors="coerce")
+        if parsed_history_dates.notna().any():
+            training_cutoff = parsed_history_dates.max().date().isoformat()
 
     if not package_id:
         raise F6IntegrityError("The active F6 package ID is unavailable.")
@@ -99,6 +107,7 @@ def active_f6_package(predictor: Any) -> ActiveF6Package:
         feature_count=feature_count,
         feature_order_sha256=feature_hash,
         recommendation_policy_id=recommendation_policy_id,
+        training_cutoff=training_cutoff,
     )
 
 
@@ -174,6 +183,49 @@ def _registered_chart_path(value: Any) -> Path:
     return chart_path
 
 
+def _registered_backtest_reference(
+    contract: ActiveF6Package,
+) -> tuple[Path, str] | None:
+    try:
+        registry = json.loads(VERIFIED_BACKTEST_REGISTRY.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(registry, Mapping) or registry.get("registry_schema_version") != 1:
+        return None
+    references = registry.get("references")
+    if not isinstance(references, list):
+        return None
+
+    for reference in references:
+        if not isinstance(reference, Mapping):
+            continue
+        prefix = str(reference.get("package_id_prefix") or "")
+        if not prefix or not contract.package_id.startswith(prefix):
+            continue
+        if (
+            str(reference.get("feature_set_id") or "") != contract.feature_set_id
+            or str(reference.get("feature_order_sha256") or "")
+            != contract.feature_order_sha256
+            or str(reference.get("recommendation_policy_id") or "")
+            != contract.recommendation_policy_id
+        ):
+            continue
+        reference_package_id = str(reference.get("reference_package_id") or "")
+        relative = Path(str(reference.get("summary_path") or ""))
+        if (
+            not reference_package_id
+            or not str(relative)
+            or relative.is_absolute()
+            or ".." in relative.parts
+        ):
+            continue
+        path = (PROJECT_ROOT / relative).resolve()
+        if PROJECT_ROOT.resolve() not in path.parents:
+            continue
+        return path, reference_package_id
+    return None
+
+
 def load_verified_backtest_summary(
     contract: ActiveF6Package,
     *,
@@ -187,10 +239,17 @@ def load_verified_backtest_summary(
     generation/CI check because ignored research artifacts are not deployed.
     """
 
+    reference_package_id = contract.package_id
+    is_reference = False
     if summary_path is None:
         if Path(contract.package_id).name != contract.package_id:
             raise BacktestSummaryError("Active package ID cannot identify a backtest summary.")
         path = VERIFIED_BACKTEST_DIR / f"{contract.package_id}.json"
+        if not path.is_file():
+            reference = _registered_backtest_reference(contract)
+            if reference is not None:
+                path, reference_package_id = reference
+                is_reference = True
     else:
         path = Path(summary_path)
     try:
@@ -207,7 +266,7 @@ def load_verified_backtest_summary(
         raise BacktestSummaryError("Historical backtest summary schema is unsupported.")
 
     expected_contract = {
-        "package_id": contract.package_id,
+        "package_id": reference_package_id,
         "model_package_schema_version": contract.schema_version,
         "feature_set_id": contract.feature_set_id,
         "feature_order_sha256": contract.feature_order_sha256,
@@ -257,7 +316,10 @@ def load_verified_backtest_summary(
                 raise BacktestSummaryError(
                     f"Verified backtest source hash does not match: {source.name}"
                 )
-    return summary
+    result = dict(summary)
+    result["is_reference_backtest"] = is_reference
+    result["active_package_id"] = contract.package_id
+    return result
 
 
 def load_verified_backtest_chart_series(
@@ -400,6 +462,7 @@ def retraining_status_label(value: Any) -> str:
         "RETRAINING_REQUIRED": "Retraining required",
         "SUCCESS": "Up to date",
         "FAILED": "Last retrain failed",
+        "DEPLOYMENT_MISMATCH": "Configuration mismatch",
     }.get(str(value or "").upper(), "Status unavailable")
 
 
@@ -744,12 +807,12 @@ def f6_training_status(
         else None
     )
 
-    if matching_success is None:
-        message = "Activated from verified candidate. First production retraining pending."
-        latest_successful_at = None
-    else:
-        message = "Confirmed production training run available."
-        latest_successful_at = matching_success.get("finished_at")
+    latest_successful_at = (
+        matching_success.get("finished_at")
+        if matching_success is not None
+        else None
+    )
+    is_nightly_package = "_f6_nightly_" in contract.package_id
 
     if dirty:
         status = "RETRAINING_REQUIRED"
@@ -757,8 +820,33 @@ def f6_training_status(
         status = str(matching_latest.get("status") or "UNKNOWN").upper()
     elif matching_success is not None:
         status = "SUCCESS"
+    elif is_nightly_package:
+        status = "DEPLOYMENT_MISMATCH"
     else:
         status = "PENDING_FIRST_F6_RETRAIN"
+
+    deployment_mismatch = is_nightly_package and matching_success is None
+    if dirty and matching_success is not None:
+        message = "New attendance is queued for the next production retraining run."
+    elif dirty and deployment_mismatch:
+        message = (
+            "Attendance is marked for retraining, but the active nightly model "
+            "has no matching training record in this data store. Check deployment "
+            "configuration."
+        )
+    elif dirty:
+        message = "Attendance changes are queued for production retraining."
+    elif matching_success is not None:
+        message = "Active model matches a confirmed production training run."
+    elif deployment_mismatch:
+        message = (
+            "The active nightly model has no matching training record in this "
+            "data store. Check deployment configuration."
+        )
+    else:
+        message = (
+            "Verified candidate active. First production retraining has not completed."
+        )
 
     return {
         "needs_retraining": dirty,
@@ -772,6 +860,7 @@ def f6_training_status(
             else None
         ),
         "message": message,
+        "deployment_mismatch": deployment_mismatch,
     }
 
 

@@ -25,6 +25,15 @@ When creating or redeploying each Streamlit Cloud app:
 2. Open Advanced settings.
 3. Select Python 3.12.
 4. Add the required Supabase secrets.
+5. Apply every SQL file in `supabase/migrations/`, including
+   `20260724_queue_retraining_from_attendance.sql`. The attendance trigger is
+   the safety net that queues retraining even if an application request is
+   interrupted after saving attendance.
+
+The Model Monitoring page and nightly workflow both print a 12-character
+training-state store fingerprint. These fingerprints must match. A mismatch
+means Streamlit and GitHub Actions are configured for different Supabase
+projects.
 
 The `runtime.txt` file documents the preferred runtime, but Streamlit Cloud Python version should
 still be confirmed in the app's Advanced settings.

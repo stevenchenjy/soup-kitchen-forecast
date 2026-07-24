@@ -34,7 +34,6 @@ from src.production_features import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ACTIVE_MODEL_SHA256 = "9eb8c75271c301f3f44ac864705c23a779c0a9f3fadedcfe896d5dea350e3397"
 LEGACY_BACKUP_SHA256 = "ee56a3fb03c212653a97f6073600189a51592db355efabe09ef2b138f36976f0"
 FALLBACK_MODEL_SHA256 = "cca9b22d63d85ff0a4f0ebd14e09209d1dfffa73f0f63e93d9117d93b75bd920"
 
@@ -334,7 +333,7 @@ def test_candidate_package_has_complete_metadata_checksums_and_no_activation(
         assert sha256(destination / filename) == digest
     assert package["package_status"] == "candidate_not_active"
     assert package["model_package_schema_version"] == 2
-    assert sha256(active_path) == active_before == ACTIVE_MODEL_SHA256
+    assert sha256(active_path) == active_before
 
 
 def test_legacy_trainer_remains_schema_v1_for_unmigrated_locations() -> None:
@@ -381,8 +380,11 @@ def test_legacy_trainer_remains_schema_v1_for_unmigrated_locations() -> None:
     assert set(package["residual_buffer_by_day"]) == {"sat", "sun"}
 
 
-def test_tracked_active_models_and_source_data_remain_unchanged() -> None:
-    assert sha256(ROOT / "models/visitor_model_ny_12550.joblib") == ACTIVE_MODEL_SHA256
+def test_tracked_active_model_is_locked_f6_and_source_data_remains_unchanged() -> None:
+    active = VisitorPredictor(str(ROOT / "models/visitor_model_ny_12550.joblib"))
+    assert active.model_package_schema_version == MODEL_PACKAGE_SCHEMA_VERSION
+    assert active.uses_locked_f6 is True
+    assert active.feature_contract == locked_feature_contract_metadata()
     assert sha256(
         ROOT / "models/backups/ny_12550_schema1_pre_f6_2026-07-16.joblib"
     ) == LEGACY_BACKUP_SHA256

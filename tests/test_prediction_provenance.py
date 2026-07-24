@@ -28,7 +28,7 @@ def test_active_f6_prediction_exposes_locked_model_provenance() -> None:
     with patch("src.config.forecast_today", return_value=date(2026, 7, 17)):
         output = predictor.predict_next("2026-07-19")
 
-    assert output.package_id == "ny_12550_f6_2026-07-12_v1"
+    assert output.package_id == predictor.package_id
     assert output.model_package_schema_version == 2
     assert output.feature_set_id == "F6_COMPACT_SELECTED"
     assert output.feature_order_sha256 == (
@@ -132,7 +132,7 @@ def test_prediction_log_persists_f6_provenance_locally(tmp_path: Path) -> None:
 
     assert len(rows) == 1
     row = rows[0]
-    assert row["package_id"] == "ny_12550_f6_2026-07-12_v1"
+    assert row["package_id"] == predictor.package_id
     assert row["model_package_schema_version"] == 2
     assert row["feature_set_id"] == "F6_COMPACT_SELECTED"
     assert row["recommendation_policy_id"] == "C0_EXISTING_RAW_QUANTILE"

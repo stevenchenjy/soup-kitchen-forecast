@@ -21,9 +21,6 @@ CANDIDATE_PACKAGE = CANDIDATE_DIR / "model_package.joblib"
 EXPECTED_CANDIDATE_SHA256 = (
     "9eb8c75271c301f3f44ac864705c23a779c0a9f3fadedcfe896d5dea350e3397"
 )
-EXPECTED_ACTIVE_SHA256 = (
-    "9eb8c75271c301f3f44ac864705c23a779c0a9f3fadedcfe896d5dea350e3397"
-)
 EXPECTED_FALLBACK_SHA256 = (
     "cca9b22d63d85ff0a4f0ebd14e09209d1dfffa73f0f63e93d9117d93b75bd920"
 )
@@ -140,8 +137,9 @@ def test_versioned_f6_candidate_loads_with_locked_contract_and_models() -> None:
     assert predictor.uses_locked_f6 is True
 
 
-def test_versioned_candidate_is_the_exact_active_model_and_fallback_is_unchanged() -> None:
-    assert sha256(ROOT / "models/visitor_model_ny_12550.joblib") == (
-        EXPECTED_ACTIVE_SHA256
-    )
+def test_active_model_keeps_locked_f6_contract_and_fallback_is_unchanged() -> None:
+    active = VisitorPredictor(str(ROOT / "models/visitor_model_ny_12550.joblib"))
+    assert active.model_package_schema_version == 2
+    assert active.uses_locked_f6 is True
+    assert active.feature_contract == load_tracked_f6_contract()
     assert sha256(ROOT / "models/visitor_model.joblib") == EXPECTED_FALLBACK_SHA256

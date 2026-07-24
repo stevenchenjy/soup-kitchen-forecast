@@ -39,7 +39,15 @@ ATTENDANCE = pd.DataFrame(
 SECRET_SENTINEL = "stage34-supabase-secret-must-not-render"
 URL_SENTINEL = "https://stage34-ui-secret-url.invalid"
 SECRET_SENTINELS = (SECRET_SENTINEL, URL_SENTINEL)
-PACKAGE_ID = "ny_12550_f6_2026-07-12_v1"
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    _ACTIVE_PREDICTOR = VisitorPredictor(str(ACTIVE_MODEL))
+PACKAGE_ID = _ACTIVE_PREDICTOR.package_id
+ACTIVE_TRAINING_CUTOFF = (
+    pd.to_datetime(_ACTIVE_PREDICTOR.history_df["service_date"])
+    .max()
+    .date()
+)
 FEATURE_SET_ID = "F6_COMPACT_SELECTED"
 POLICY_ID = "C0_EXISTING_RAW_QUANTILE"
 BLOCKED_SOURCE_ROOTS = (
@@ -715,18 +723,21 @@ def test_active_f6_admin_and_staff_prediction_paths(
     assert all(term not in text.lower() for term in forbidden)
     if app_filename == "app.py":
         assert (
-            "Forecast model active · Version 2026-07-12 · Raw Q80 recommendation"
+            "Forecast model active · Trained through "
+            f"{ACTIVE_TRAINING_CUTOFF.strftime('%B')} "
+            f"{ACTIVE_TRAINING_CUTOFF.day}, {ACTIVE_TRAINING_CUTOFF.year} · "
+            "Raw Q80 recommendation"
             in text
         )
         details = result["technical_details"]
         assert details is not None
         assert details["expanded"] is False
-        assert "ny_12550_f6_2026-07-12_v1" in details["text"]
+        assert PACKAGE_ID in details["text"]
         assert "Schema Version" in details["text"]
         assert "F6_COMPACT_SELECTED" in details["text"]
         assert "dac868ae1a73…607f7419" in details["text"]
         assert "C0_EXISTING_RAW_QUANTILE" in details["text"]
-        assert "ny_12550_f6_2026-07-12_v1" not in result["non_technical_text"]
+        assert PACKAGE_ID not in result["non_technical_text"]
         assert "F6_COMPACT_SELECTED" not in result["non_technical_text"]
         assert "C0_EXISTING_RAW_QUANTILE" not in result["non_technical_text"]
         assert all(
@@ -815,9 +826,14 @@ def test_admin_monitoring_separates_backtest_live_and_operational_scopes() -> No
     assert "Model Performance" in text
     assert "Live Performance" in text
     assert "Operational Impact" in text
-    assert "Origin-aware historical backtest using attendance through July 12, 2026." in text
     assert (
-        "Activated from verified candidate. First production retraining pending."
+        "Verified reference backtest for the locked F6 method using attendance "
+        "through July 12, 2026."
+        in text
+    )
+    assert (
+        "The active nightly model has no matching training record in this data "
+        "store. Check deployment configuration."
         in text
     )
     assert "2026-07-13T10:21:30+00:00" not in text
@@ -826,7 +842,7 @@ def test_admin_monitoring_separates_backtest_live_and_operational_scopes() -> No
     assert "Last Attendance Update" in text
     assert "Jul 12, 2026" in text
     assert "Retraining Status" in text
-    assert "Pending first retrain" in text
+    assert "Configuration mismatch" in text
     assert "999.0" not in text
     assert "Live MAE" not in metrics
     assert "MAPE" not in metrics

@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime, timezone
 
 import streamlit as st
 
@@ -24,7 +24,14 @@ from src.config import (
     model_file_for_location,
     parse_service_date,
 )
-from src.data_admin import attendance_store_mode, delete_record, load_clean_data, save_clean_data, upsert_record
+from src.data_admin import (
+    RetrainingQueueError,
+    attendance_store_mode,
+    delete_record,
+    load_clean_data,
+    save_clean_data,
+    upsert_record,
+)
 from src.f6_charts import (
     build_absolute_error_chart,
     build_actual_vs_predicted_chart,
@@ -48,6 +55,7 @@ from src.model_training_runs import (
     latest_successful_training_run,
     latest_training_run,
     model_training_run_store_mode,
+    model_training_run_store_fingerprint,
 )
 from src.prediction_logs import (
     load_prediction_logs,
@@ -196,6 +204,44 @@ def render_prediction():
             st.error(f"Prediction failed: {e}")
 
 
+@st.fragment(run_every=60)
+def render_training_status():
+    st.markdown("### Training Status")
+    try:
+        retrain_state = get_retrain_state(location_id)
+        latest_run = latest_training_run(location_id)
+        latest_success = latest_successful_training_run(location_id)
+        training = f6_training_status(
+            active_package,
+            retrain_state=retrain_state,
+            latest_run=latest_run,
+            latest_successful_run=latest_success,
+        )
+    except Exception as exc:
+        st.warning(f"Training status could not be loaded: {exc}")
+        return
+
+    t1, t2, t3 = st.columns(3)
+    t1.caption("Needs Retraining")
+    t1.markdown(f"**{'Yes' if training['needs_retraining'] else 'No'}**")
+    t2.caption("Last Attendance Update")
+    t2.markdown(
+        f"**{format_dashboard_date((retrain_state or {}).get('last_attendance_updated_at'))}**"
+    )
+    t3.caption("Retraining Status")
+    t3.markdown(f"**{retraining_status_label(training['status'])}**")
+    if training["deployment_mismatch"]:
+        st.warning(training["message"])
+    else:
+        st.info(training["message"])
+    checked_at = datetime.now(timezone.utc).strftime("%b %d, %Y %H:%M UTC")
+    st.caption(
+        "Status source "
+        f"`{model_training_run_store_fingerprint()}` · checked {checked_at} · "
+        "refreshes every minute"
+    )
+
+
 def render_model_monitoring():
     st.subheader("Model Monitoring")
     st.caption(f"Prediction log store: {prediction_log_store_mode()}")
@@ -215,10 +261,15 @@ def render_model_monitoring():
         backtest_error = None
 
     feature_hash = active_package.feature_order_sha256
-    version = backtest["attendance_cutoff"] if backtest is not None else "Unavailable"
+    if active_package.training_cutoff is None:
+        trained_through = "an unavailable date"
+    else:
+        cutoff = date.fromisoformat(active_package.training_cutoff)
+        trained_through = f"{cutoff.strftime('%B')} {cutoff.day}, {cutoff.year}"
     st.markdown("### Active Model")
     st.success(
-        f"Forecast model active · Version {version} · Raw Q80 recommendation"
+        f"Forecast model active · Trained through {trained_through} · "
+        "Raw Q80 recommendation"
     )
     with st.expander("Technical details", expanded=False):
         st.markdown(f"**Package ID:** `{active_package.package_id}`")
@@ -243,10 +294,17 @@ def render_model_monitoring():
     if backtest is not None:
         metrics = backtest["metrics"]
         cutoff = date.fromisoformat(backtest["attendance_cutoff"])
-        st.caption(
-            "Origin-aware historical backtest using attendance through "
-            f"{cutoff.strftime('%B')} {cutoff.day}, {cutoff.year}."
-        )
+        if backtest["is_reference_backtest"]:
+            st.caption(
+                "Verified reference backtest for the locked F6 method using "
+                "attendance through "
+                f"{cutoff.strftime('%B')} {cutoff.day}, {cutoff.year}."
+            )
+        else:
+            st.caption(
+                "Origin-aware historical backtest using attendance through "
+                f"{cutoff.strftime('%B')} {cutoff.day}, {cutoff.year}."
+            )
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("MAE", number(metrics["mae"]))
         m2.metric("Median Absolute Error", number(metrics["median_absolute_error"]))
@@ -411,31 +469,7 @@ def render_model_monitoring():
         f"{ESTIMATED_WASTE_REDUCTION_RATE:.0%} meal-waste reduction assumption."
     )
 
-    st.markdown("### Training Status")
-    try:
-        retrain_state = get_retrain_state(location_id)
-        latest_run = latest_training_run(location_id)
-        latest_success = latest_successful_training_run(location_id)
-        training = f6_training_status(
-            active_package,
-            retrain_state=retrain_state,
-            latest_run=latest_run,
-            latest_successful_run=latest_success,
-        )
-    except Exception as exc:
-        training = None
-        st.warning(f"Training status could not be loaded: {exc}")
-    if training is not None:
-        t1, t2, t3 = st.columns(3)
-        t1.caption("Needs Retraining")
-        t1.markdown(f"**{'Yes' if training['needs_retraining'] else 'No'}**")
-        t2.caption("Last Attendance Update")
-        t2.markdown(
-            f"**{format_dashboard_date((retrain_state or {}).get('last_attendance_updated_at'))}**"
-        )
-        t3.caption("Retraining Status")
-        t3.markdown(f"**{retraining_status_label(training['status'])}**")
-        st.info(training["message"])
+    render_training_status()
 
 
 
@@ -477,16 +511,29 @@ def render_data_ops():
             if add_date is None:
                 st.error("Please select date")
             else:
-                upsert_record(str(add_date), int(add_visitors), location_id)
-                monitoring_updated = True
+                saved = False
                 try:
-                    update_prediction_logs_with_actual(location_id, str(add_date), int(add_visitors))
-                except Exception:
-                    monitoring_updated = False
-                    st.warning("Attendance was saved, but monitoring log could not be updated.")
-                st.success("Saved")
-                if monitoring_updated:
-                    st.rerun()
+                    upsert_record(str(add_date), int(add_visitors), location_id)
+                    saved = True
+                except RetrainingQueueError as exc:
+                    saved = True
+                    st.warning(str(exc))
+                except Exception as exc:
+                    st.error(f"Attendance could not be saved: {exc}")
+                if saved:
+                    monitoring_updated = True
+                    try:
+                        update_prediction_logs_with_actual(
+                            location_id, str(add_date), int(add_visitors)
+                        )
+                    except Exception:
+                        monitoring_updated = False
+                        st.warning(
+                            "Attendance was saved, but monitoring log could not be updated."
+                        )
+                    st.success("Saved")
+                    if monitoring_updated:
+                        st.rerun()
 
     with st.expander("Advanced Administration", expanded=False):
         st.markdown("#### Delete Attendance Record")
@@ -494,9 +541,18 @@ def render_data_ops():
         del_date = st.selectbox("Service date to delete", options=del_options, index=None, placeholder="Select date")
         if st.button("Delete Attendance Record"):
             if del_date:
-                delete_record(del_date, location_id)
-                st.success(f"Deleted {del_date}")
-                st.rerun()
+                deleted = False
+                try:
+                    delete_record(del_date, location_id)
+                    deleted = True
+                except RetrainingQueueError as exc:
+                    deleted = True
+                    st.warning(str(exc))
+                except Exception as exc:
+                    st.error(f"Attendance could not be deleted: {exc}")
+                if deleted:
+                    st.success(f"Deleted {del_date}")
+                    st.rerun()
             else:
                 st.error("Please select date")
 
@@ -519,9 +575,18 @@ def render_data_ops():
             },
         )
         if st.button("Save Bulk Edits"):
-            save_clean_data(edit_df, location_id)
-            st.success("Saved")
-            st.rerun()
+            saved = False
+            try:
+                save_clean_data(edit_df, location_id)
+                saved = True
+            except RetrainingQueueError as exc:
+                saved = True
+                st.warning(str(exc))
+            except Exception as exc:
+                st.error(f"Attendance could not be saved: {exc}")
+            if saved:
+                st.success("Saved")
+                st.rerun()
 
         st.markdown("#### Production Retraining")
         st.caption(

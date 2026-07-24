@@ -41,7 +41,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r requirements.txt pytest
 
       - name: Run nightly retraining
         run: |
@@ -121,6 +121,12 @@ jobs:
               print(f"Validated {model_path}")
           PY
 
+      - name: Run publication test gate
+        run: |
+          python -m pytest -q
+          git diff --check
+          git diff --cached --check
+
       - name: Commit updated models and artifacts
         run: |
           if git diff --cached --quiet -- models artifacts; then
@@ -135,4 +141,5 @@ jobs:
       - name: Mark retrained locations published
         run: |
           python scripts/mark_retrain_published.py \
-            --locations-file "$RUNNER_TEMP/nightly-retrained-locations.txt"
+            --locations-file "$RUNNER_TEMP/nightly-retrained-locations.txt" \
+            --commit-sha "$(git rev-parse HEAD)"

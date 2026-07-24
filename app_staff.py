@@ -12,6 +12,7 @@ from src.config import (
     parse_service_date,
 )
 from src.data_admin import (
+    RetrainingQueueError,
     delete_latest_staff_created_attendance,
     latest_staff_created_attendance,
     load_clean_data,
@@ -165,6 +166,7 @@ add_date = st.date_input("Service date", value=None, key="staff_add_date")
 add_visitors = st.number_input("Actual visitors served", min_value=0, max_value=10000, value=120, step=1)
 if st.button("Add / Update"):
     if add_date is not None:
+        saved = False
         try:
             upsert_record(
                 str(add_date),
@@ -173,11 +175,15 @@ if st.button("Add / Update"):
                 changed_by=user["username"],
                 load_result=False,
             )
+            saved = True
+        except RetrainingQueueError as exc:
+            saved = True
+            st.warning(str(exc))
         except (TimeoutError, URLError, HTTPError):
             st.error(ATTENDANCE_SAVE_ERROR_MESSAGE)
         except Exception:
             st.error(ATTENDANCE_SAVE_ERROR_MESSAGE)
-        else:
+        if saved:
             try:
                 update_prediction_logs_with_actual(location_id, str(add_date), int(add_visitors))
             except Exception:
@@ -289,6 +295,13 @@ else:
         else:
             try:
                 deleted = delete_latest_staff_created_attendance(location_id, user["username"])
+            except RetrainingQueueError as exc:
+                st.warning(str(exc))
+                st.session_state.pop(f"staff_full_history_{location_id}", None)
+                st.session_state["staff_delete_message"] = (
+                    f"Deleted your attendance entry for {latest_entry['service_date']}."
+                )
+                st.rerun()
             except (TimeoutError, URLError, HTTPError):
                 st.error(ATTENDANCE_UNAVAILABLE_MESSAGE)
             except Exception:

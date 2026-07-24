@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from datetime import datetime, timezone
@@ -72,6 +73,15 @@ def _supabase_config() -> dict[str, str] | None:
 
 def model_training_run_store_mode() -> str:
     return "supabase" if _supabase_config() else "unconfigured"
+
+
+def model_training_run_store_fingerprint() -> str:
+    """Return a safe identifier for comparing deployment data stores."""
+
+    config = _supabase_config()
+    if config is None:
+        return "unconfigured"
+    return hashlib.sha256(config["url"].encode("utf-8")).hexdigest()[:12]
 
 
 def supabase_configured() -> bool:
@@ -228,6 +238,36 @@ def clear_location_dirty_if_unchanged(
             "dirty": False,
             "last_successful_training_at": now,
             "updated_at": now,
+        },
+        extra_headers={"Prefer": "return=representation"},
+    )
+    return isinstance(rows, list) and bool(rows)
+
+
+def defer_location_until_attendance_changes(
+    location_id: str,
+    expected_attendance_updated_at: str | None,
+) -> bool:
+    """Stop retrying an untrainable location until its attendance changes."""
+
+    if not supabase_configured():
+        return False
+
+    attendance_filter = (
+        f"eq.{expected_attendance_updated_at}"
+        if expected_attendance_updated_at is not None
+        else "is.null"
+    )
+    rows = _supabase_request(
+        _retrain_state_table(),
+        "PATCH",
+        params={
+            "location_id": f"eq.{location_id}",
+            "last_attendance_updated_at": attendance_filter,
+        },
+        payload={
+            "dirty": False,
+            "updated_at": now_iso(),
         },
         extra_headers={"Prefer": "return=representation"},
     )

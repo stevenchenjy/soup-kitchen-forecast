@@ -169,7 +169,7 @@ def test_nightly_f6_training_uses_supabase_frame_and_publishes_schema_v2(
     package = joblib.load(CANDIDATE)
     package_id = "ny_12550_f6_nightly_2026-07-12_v1"
     package["package_id"] = package_id
-    package["package_status"] = "nightly_pending_publication"
+    package["package_status"] = "production_nightly"
     attendance = package["history_df"][["service_date", "visitors"]].copy()
     location = Location(id="ny_12550", name="Newburgh", zip_code="12550")
 
@@ -178,6 +178,8 @@ def test_nightly_f6_training_uses_supabase_frame_and_publishes_schema_v2(
         "build_f6_model_package",
         return_value=(package, {"overall": {"BacktestRows": 1}}),
     ) as build, patch.object(
+        nightly_retrain, "_nightly_f6_package_id", return_value=package_id
+    ), patch.object(
         nightly_retrain, "model_file_for_location", return_value=active
     ), patch.object(
         nightly_retrain, "F6_PREVIOUS_ACTIVE_BACKUP", previous
@@ -194,6 +196,116 @@ def test_nightly_f6_training_uses_supabase_frame_and_publishes_schema_v2(
     )
     assert result["recommendation_policy_id"] == "C0_EXISTING_RAW_QUANTILE"
     assert previous.is_file()
+
+
+def test_nightly_package_id_changes_for_same_date_attendance_correction() -> None:
+    original = pd.DataFrame(
+        {
+            "service_date": pd.to_datetime(["2026-07-12", "2026-07-19"]),
+            "visitors": [100, 120],
+        }
+    )
+    corrected = original.copy()
+    corrected.loc[0, "visitors"] = 101
+
+    first = nightly_retrain._nightly_f6_package_id(
+        "ny_12550", original, run_revision="run-123"
+    )
+    second = nightly_retrain._nightly_f6_package_id(
+        "ny_12550", corrected, run_revision="run-123"
+    )
+
+    assert first != second
+    assert first.endswith("_rrun123_v1")
+    assert second.endswith("_rrun123_v1")
+    assert "2026-07-19" in first
+
+
+def test_insufficient_location_is_deferred_until_attendance_changes() -> None:
+    location = Location(id="other", name="Other", zip_code="00000")
+    attendance = pd.DataFrame(
+        {"service_date": pd.to_datetime(["2026-07-19"]), "visitors": [100]}
+    )
+    args = SimpleNamespace(min_train_size=18, quantile=0.8)
+
+    with patch.object(
+        nightly_retrain, "load_clean_data", return_value=attendance
+    ), patch.object(
+        nightly_retrain,
+        "_latest_attendance_update",
+        return_value="2026-07-19T12:00:00+00:00",
+    ), patch.object(
+        nightly_retrain,
+        "defer_location_until_attendance_changes",
+        return_value=True,
+    ) as defer:
+        status = nightly_retrain.retrain_one_location(location, args)
+
+    assert status == "skipped"
+    defer.assert_called_once_with("other", "2026-07-19T12:00:00+00:00")
+
+
+def test_dirty_marker_revision_wins_over_older_remaining_attendance() -> None:
+    dirty_revision = "2026-07-24T01:00:00+00:00"
+
+    with patch.object(
+        nightly_retrain,
+        "get_retrain_state",
+        return_value={
+            "dirty": True,
+            "last_attendance_updated_at": dirty_revision,
+        },
+    ), patch.object(
+        nightly_retrain, "latest_attendance_updated_at"
+    ) as latest_attendance:
+        revision = nightly_retrain._latest_attendance_update("other")
+
+    assert revision == dirty_revision
+    latest_attendance.assert_not_called()
+
+
+def test_training_snapshots_dirty_revision_before_loading_attendance(
+    tmp_path: Path,
+) -> None:
+    location = Location(id="other", name="Other", zip_code="00000")
+    attendance = pd.DataFrame(
+        {
+            "service_date": pd.date_range("2025-01-04", periods=20, freq="7D"),
+            "visitors": 100,
+        }
+    )
+    trained_path = tmp_path / "other.joblib"
+    args = SimpleNamespace(min_train_size=18, quantile=0.8)
+    calls: list[str] = []
+
+    def snapshot(_location_id: str) -> str:
+        calls.append("snapshot")
+        return "2026-07-24T01:00:00+00:00"
+
+    def load(_location_id: str) -> pd.DataFrame:
+        calls.append("load")
+        return attendance
+
+    with patch.object(
+        nightly_retrain, "_latest_attendance_update", side_effect=snapshot
+    ), patch.object(
+        nightly_retrain, "load_clean_data", side_effect=load
+    ), patch.object(
+        nightly_retrain, "train_legacy_location", return_value=trained_path
+    ), patch.object(
+        nightly_retrain, "_load_metrics", return_value={}
+    ), patch.object(
+        nightly_retrain, "create_training_run"
+    ) as create_run, patch.object(
+        nightly_retrain, "artifact_dir_for_location", return_value=tmp_path
+    ):
+        status = nightly_retrain.retrain_one_location(location, args)
+
+    assert status == "success"
+    assert calls == ["snapshot", "load"]
+    assert create_run.call_args.kwargs[
+        "latest_attendance_updated_at_value"
+    ] == "2026-07-24T01:00:00+00:00"
 
 
 def test_other_locations_keep_legacy_nightly_training(tmp_path: Path) -> None:
@@ -225,6 +337,21 @@ def test_workflow_stages_rolling_backup_and_validates_ny_schema_v2() -> None:
     assert "models/backups/ny_12550_previous_active.joblib" in workflow
     assert "validate_f6_package_file(model_path)" in workflow
     assert "ny_12550 nightly publication is not schema v2" in workflow
+    assert "python -m pytest -q" in workflow
+    assert "git diff --check" in workflow
+    assert "git diff --cached --check" in workflow
+    assert workflow.index("python -m pytest -q") < workflow.index("git push origin main")
+
+
+def test_attendance_trigger_migration_queues_retraining() -> None:
+    migration = (
+        ROOT
+        / "supabase/migrations/20260724_queue_retraining_from_attendance.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "security definer" in migration.lower()
+    assert "after insert or update or delete on public.attendance" in migration.lower()
+    assert "dirty = true" in migration.lower()
 
 
 def test_nightly_code_has_no_csv_or_research_artifact_dependency() -> None:

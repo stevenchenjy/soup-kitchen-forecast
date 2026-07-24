@@ -12,7 +12,7 @@ from urllib.request import Request, urlopen
 import pandas as pd
 
 from src.config import CLEAN_DATA_FILE, DATE_COL, TARGET_COL, location_db_file
-from src.model_training_runs import mark_location_dirty
+from src.model_training_runs import get_retrain_state, mark_location_dirty
 
 try:
     import streamlit as st
@@ -22,6 +22,11 @@ except ModuleNotFoundError:
 
 ATTENDANCE_TABLE_DEFAULT = "attendance"
 ATTENDANCE_CHANGE_LOG_TABLE_DEFAULT = "attendance_change_log"
+
+
+class RetrainingQueueError(RuntimeError):
+    """Attendance was saved, but its retraining marker could not be persisted."""
+
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS attendance (
@@ -225,8 +230,16 @@ def _prune_staff_receipts_supabase(
 def _mark_location_dirty(location_id: str, attendance_updated_at: str | None = None) -> None:
     try:
         mark_location_dirty(location_id, attendance_updated_at)
-    except Exception:
-        pass
+    except Exception as exc:
+        try:
+            state = get_retrain_state(location_id)
+        except Exception:
+            state = None
+        if state and state.get("dirty"):
+            return
+        raise RetrainingQueueError(
+            "Attendance was saved, but automatic retraining could not be queued."
+        ) from exc
 
 
 def _normalize_attendance_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -606,10 +619,16 @@ def delete_latest_staff_created_attendance(location_id: str, changed_by: str) ->
         return None
 
     service_date = str(attendance["service_date"])
-    delete_record(service_date, location_id)
+    queue_error = None
+    try:
+        delete_record(service_date, location_id)
+    except RetrainingQueueError as exc:
+        queue_error = exc
 
     from src.prediction_logs import set_prediction_logs_actual
 
     set_prediction_logs_actual(location_id, service_date, None)
     _consume_staff_receipts(location_id, changed_by)
+    if queue_error is not None:
+        raise queue_error
     return attendance

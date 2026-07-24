@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import re
 import sys
 import tempfile
 import traceback
@@ -34,10 +36,12 @@ from src.model_publication import (
 )
 from src.model_training_runs import (
     create_training_run,
+    defer_location_until_attendance_changes,
     get_retrain_state,
     latest_attendance_updated_at,
     list_dirty_location_ids,
     mark_location_dirty,
+    model_training_run_store_fingerprint,
     supabase_configured,
 )
 
@@ -91,16 +95,53 @@ def _dirty_locations(args: argparse.Namespace) -> list[Location]:
 
 def _latest_attendance_update(location_id: str) -> str | None:
     state = get_retrain_state(location_id)
-    if state and state.get("last_attendance_updated_at"):
-        return state["last_attendance_updated_at"]
+    if state is not None:
+        value = state.get("last_attendance_updated_at")
+        return str(value) if value is not None else None
     return latest_attendance_updated_at(location_id)
 
 
-def _nightly_f6_package_id(location_id: str, attendance_df: pd.DataFrame) -> str:
+def _attendance_fingerprint(attendance_df: pd.DataFrame) -> str:
+    normalized = attendance_df[["service_date", "visitors"]].copy()
+    normalized["service_date"] = pd.to_datetime(
+        normalized["service_date"], errors="raise"
+    ).dt.strftime("%Y-%m-%d")
+    normalized["visitors"] = pd.to_numeric(
+        normalized["visitors"], errors="raise"
+    ).map(lambda value: format(float(value), ".12g"))
+    normalized = normalized.sort_values("service_date", kind="stable")
+    payload = "\n".join(
+        f"{row.service_date},{row.visitors}"
+        for row in normalized.itertuples(index=False)
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _nightly_f6_package_id(
+    location_id: str,
+    attendance_df: pd.DataFrame,
+    *,
+    run_revision: str | None = None,
+) -> str:
     latest_service_date = pd.to_datetime(
         attendance_df["service_date"], errors="raise"
     ).max().date().isoformat()
-    return f"{location_id}_f6_nightly_{latest_service_date}_v1"
+    attendance_sha = _attendance_fingerprint(attendance_df)[:12]
+    if run_revision is not None:
+        revision = run_revision
+    else:
+        revision = (
+            os.getenv("GITHUB_RUN_ID")
+            or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        )
+        attempt = os.getenv("GITHUB_RUN_ATTEMPT")
+        if attempt:
+            revision = f"{revision}a{attempt}"
+    safe_revision = re.sub(r"[^A-Za-z0-9]+", "", revision)[:32]
+    return (
+        f"{location_id}_f6_nightly_{latest_service_date}_"
+        f"{attendance_sha}_r{safe_revision}_v1"
+    )
 
 
 def _write_f6_metrics(
@@ -138,7 +179,7 @@ def train_f6_location(location: Location, attendance_df: pd.DataFrame) -> Path:
         location_id=location.id,
         attendance=attendance_df,
         package_id=package_id,
-        package_status="nightly_pending_publication",
+        package_status="production_nightly",
     )
     model_path = model_file_for_location(location.id)
     model_path.parent.mkdir(parents=True, exist_ok=True)
@@ -212,17 +253,22 @@ def _print_summary(
 
 def retrain_one_location(location: Location, args: argparse.Namespace) -> str:
     print(f"=== {location.id}: checking attendance ===", flush=True)
+    latest_attendance_update = _latest_attendance_update(location.id)
     attendance_df = load_clean_data(location.id)
     attendance_rows = int(len(attendance_df))
     if attendance_rows < args.min_train_size:
+        deferred = defer_location_until_attendance_changes(
+            location.id,
+            latest_attendance_update,
+        )
         print(
             f"{location.id}: skipped - only {attendance_rows} attendance rows; "
-            f"need at least {args.min_train_size}",
+            f"need at least {args.min_train_size}; "
+            f"{'deferred until attendance changes' if deferred else 'dirty state retained'}",
             flush=True,
         )
         return "skipped"
 
-    latest_attendance_update = _latest_attendance_update(location.id)
     model_path = model_file_for_location(location.id)
     artifact_dir = artifact_dir_for_location(location.id)
 
@@ -255,7 +301,7 @@ def retrain_one_location(location: Location, args: argparse.Namespace) -> str:
         return "success"
     except Exception as exc:
         error_message = f"{exc}\n{traceback.format_exc(limit=5)}"
-        mark_location_dirty(location.id, latest_attendance_update)
+        mark_location_dirty(location.id)
         create_training_run(
             location_id=location.id,
             status="failed",
@@ -297,6 +343,11 @@ def main() -> int:
         print("Supabase is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.", flush=True)
         return 2
 
+    print(
+        "Training-state store fingerprint: "
+        f"{model_training_run_store_fingerprint()}",
+        flush=True,
+    )
     locations_checked = len(_selected_locations(args))
     locations = _dirty_locations(args)
     if not locations:

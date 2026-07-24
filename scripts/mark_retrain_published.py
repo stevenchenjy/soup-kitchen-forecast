@@ -14,6 +14,7 @@ from src.model_training_runs import (
     clear_location_dirty_if_unchanged,
     latest_successful_training_run,
     supabase_configured,
+    update_training_run,
 )
 
 
@@ -21,6 +22,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Mark successfully published retrained locations clean.")
     parser.add_argument("location_ids", nargs="*", help="Location IDs whose artifacts were published")
     parser.add_argument("--locations-file", help="Optional newline-delimited file containing location IDs")
+    parser.add_argument(
+        "--commit-sha",
+        help="Published Git commit containing the trained model and artifacts",
+    )
     return parser.parse_args()
 
 
@@ -56,6 +61,11 @@ def main() -> int:
         if training_run is None:
             print(f"{location_id}: no successful training run found; dirty state retained", flush=True)
             return 1
+        if args.commit_sha and training_run.get("id") is not None:
+            update_training_run(
+                int(training_run["id"]),
+                commit_sha=args.commit_sha,
+            )
         cleared = clear_location_dirty_if_unchanged(
             location_id,
             training_run.get("latest_attendance_updated_at"),

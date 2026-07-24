@@ -83,6 +83,33 @@ class RecentAttendanceTests(unittest.TestCase):
         load_all.assert_not_called()
         self.assertEqual(result["visitors"].tolist(), [120])
 
+    def test_dirty_marker_failure_is_not_silently_discarded(self) -> None:
+        with patch.object(
+            data_admin,
+            "mark_location_dirty",
+            side_effect=RuntimeError("synthetic Supabase failure"),
+        ), patch.object(data_admin, "get_retrain_state", return_value=None):
+            with self.assertRaises(data_admin.RetrainingQueueError):
+                data_admin._mark_location_dirty(
+                    self.location_id,
+                    "2026-07-19T12:00:00+00:00",
+                )
+
+    def test_database_trigger_confirmation_recovers_marker_request_failure(self) -> None:
+        with patch.object(
+            data_admin,
+            "mark_location_dirty",
+            side_effect=RuntimeError("synthetic request failure"),
+        ), patch.object(
+            data_admin,
+            "get_retrain_state",
+            return_value={"location_id": self.location_id, "dirty": True},
+        ):
+            data_admin._mark_location_dirty(
+                self.location_id,
+                "2026-07-19T12:00:00+00:00",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

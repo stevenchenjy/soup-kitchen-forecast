@@ -692,6 +692,139 @@ def test_staff_recent_attendance_renders_fewer_rows_without_blank_space() -> Non
     assert dataframe_heights == [143]
 
 
+def _run_staff_pending_attendance_ui(
+    prediction_rows: list[dict[str, Any]],
+    attendance: pd.DataFrame,
+    *,
+    select_single_pending_date: bool = False,
+    save_date: date | None = None,
+) -> AppTest:
+    saved_logs: list[tuple[Any, ...]] = []
+    with TemporaryDirectory() as artifact_directory, ExitStack() as stack:
+        _configure_common_patches(
+            stack,
+            user=_user("staff"),
+            model_path=ACTIVE_MODEL,
+            artifact_dir=Path(artifact_directory),
+            saved_logs=saved_logs,
+            f6=True,
+            prediction_rows=prediction_rows,
+            attendance_frame=attendance,
+        )
+        if save_date is not None:
+            def save_attendance(
+                service_date: str,
+                visitors: int,
+                *args: Any,
+                **kwargs: Any,
+            ) -> pd.DataFrame:
+                attendance.loc[len(attendance)] = {
+                    "service_date": pd.Timestamp(service_date),
+                    "visitors": visitors,
+                }
+                return attendance.copy()
+
+            stack.enter_context(
+                patch("src.data_admin.upsert_record", side_effect=save_attendance)
+            )
+            stack.enter_context(
+                patch(
+                    "src.data_admin.load_clean_data",
+                    side_effect=lambda *args, **kwargs: attendance.copy(),
+                )
+            )
+            stack.enter_context(
+                patch("src.prediction_logs.update_prediction_logs_with_actual", return_value=1)
+            )
+        app = AppTest.from_file(str(ROOT / "app_staff.py"), default_timeout=60)
+        app.session_state["user"] = {"username": "staff-test"}
+        app.run()
+        if select_single_pending_date:
+            record_button = next(
+                button for button in app.button if button.label == "Record attendance"
+            )
+            record_button.click()
+            app.run()
+        if save_date is not None:
+            service_date = next(
+                field for field in app.date_input if field.label == "Service date"
+            )
+            service_date.set_value(save_date)
+            next(
+                button for button in app.button if button.label == "Add / Update"
+            ).click()
+            app.run()
+
+    assert not app.exception
+    assert not app.error
+    assert saved_logs == []
+    return app
+
+
+def test_staff_shows_a_single_actionable_reminder_for_missing_predicted_attendance() -> None:
+    app = _run_staff_pending_attendance_ui(
+        [
+            {"service_date": "2026-07-12", "actual_visitors": None},
+            {"service_date": "2026-07-18", "actual_visitors": None},
+        ],
+        pd.DataFrame(
+            {"service_date": pd.to_datetime(["2026-07-11"]), "visitors": [100]}
+        ),
+        select_single_pending_date=True,
+    )
+
+    assert "Attendance is still needed for Sun, Jul 12." in _element_text(app)
+
+    service_date = next(
+        field for field in app.date_input if field.label == "Service date"
+    )
+    assert service_date.value == date(2026, 7, 12)
+
+
+def test_staff_hides_reminder_when_attendance_exists_even_if_monitoring_is_stale() -> None:
+    app = _run_staff_pending_attendance_ui(
+        [{"service_date": "2026-07-12", "actual_visitors": None}],
+        pd.DataFrame(
+            {"service_date": pd.to_datetime(["2026-07-12"]), "visitors": [100]}
+        ),
+    )
+
+    assert "Attendance is still needed" not in _element_text(app)
+    assert not [
+        button for button in app.button if button.label == "Record attendance"
+    ]
+
+
+def test_staff_clears_the_reminder_after_saving_that_attendance() -> None:
+    app = _run_staff_pending_attendance_ui(
+        [{"service_date": "2026-07-12", "actual_visitors": None}],
+        pd.DataFrame(
+            {"service_date": pd.to_datetime(["2026-07-11"]), "visitors": [100]}
+        ),
+        save_date=date(2026, 7, 12),
+    )
+
+    assert "Attendance is still needed" not in _element_text(app)
+    assert "Saved." in _element_text(app)
+
+
+def test_staff_groups_multiple_missing_predicted_dates_in_a_collapsed_review() -> None:
+    app = _run_staff_pending_attendance_ui(
+        [
+            {"service_date": "2026-07-11", "actual_visitors": None},
+            {"service_date": "2026-07-12", "actual_visitors": None},
+        ],
+        pd.DataFrame(columns=["service_date", "visitors"]),
+    )
+
+    assert any(
+        element.label
+        == "🟡 2 predicted service dates need attendance — Review"
+        and not element.proto.expanded
+        for element in app.expander
+    )
+
+
 @pytest.mark.parametrize("app_filename,role", [("app.py", "master"), ("app_staff.py", "staff")])
 @pytest.mark.parametrize("target_date,segment", [("2026-07-18", "sat"), ("2026-07-19", "sun")])
 def test_active_f6_admin_and_staff_prediction_paths(

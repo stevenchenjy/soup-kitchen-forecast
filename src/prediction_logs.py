@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 import json
 import os
 import sqlite3
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any
 from urllib.error import HTTPError
 from urllib.parse import urlencode
@@ -82,6 +82,40 @@ def _service_date(value: Any) -> str:
     if hasattr(value, "strftime"):
         return value.strftime("%Y-%m-%d")
     return str(value)[:10]
+
+
+def pending_prediction_service_dates(
+    prediction_rows: Iterable[Mapping[str, Any]],
+    attendance_service_dates: Iterable[Any],
+    as_of_date: date,
+) -> list[date]:
+    """Return past predicted service dates that do not have attendance recorded.
+
+    Prediction logs decide which dates are relevant. Attendance storage is the
+    source of truth for completion so a transient monitoring-log update failure
+    does not create a false reminder for staff.
+    """
+    recorded_dates = {
+        _service_date(service_date)
+        for service_date in attendance_service_dates
+        if service_date is not None
+    }
+    pending_dates: set[date] = set()
+
+    for row in prediction_rows:
+        service_date_value = row.get("service_date")
+        if service_date_value is None:
+            continue
+        service_date_text = _service_date(service_date_value)
+        try:
+            service_date = date.fromisoformat(service_date_text)
+        except ValueError:
+            continue
+        if service_date >= as_of_date or service_date_text in recorded_dates:
+            continue
+        pending_dates.add(service_date)
+
+    return sorted(pending_dates)
 
 
 def _secret_value(*names: str) -> str | None:

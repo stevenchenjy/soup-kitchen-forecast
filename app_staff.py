@@ -8,6 +8,7 @@ from src.config import (
     ForecastTargetDateError,
     ServiceDateParseError,
     TARGET_COL,
+    forecast_today,
     model_file_for_location,
     parse_service_date,
 )
@@ -21,7 +22,12 @@ from src.data_admin import (
 )
 from src.f6_monitoring import F6IntegrityError, active_f6_package
 from src.location_config import list_locations
-from src.prediction_logs import save_prediction_log, update_prediction_logs_with_actual
+from src.prediction_logs import (
+    load_prediction_logs,
+    pending_prediction_service_dates,
+    save_prediction_log,
+    update_prediction_logs_with_actual,
+)
 from src.predictor import VisitorPredictor, WeatherForecastUnavailableError
 
 st.set_page_config(page_title="Staff Meal Prep Assistant", layout="centered")
@@ -80,6 +86,7 @@ if not all_locations:
 
 locations = get_authorized_locations(user, all_locations)
 loc_names = {loc.name: loc.id for loc in locations}
+locations_by_id = {loc.id: loc for loc in locations}
 
 st.title("Staff Meal Prep Assistant")
 st.caption("Plan meals and record attendance for your location.")
@@ -120,6 +127,13 @@ if predictor is not None:
 delete_message = st.session_state.pop("staff_delete_message", None)
 if delete_message:
     st.success(delete_message)
+attendance_save_message = st.session_state.pop("staff_attendance_save_message", None)
+if attendance_save_message:
+    st.success(attendance_save_message)
+for attendance_save_warning in st.session_state.pop(
+    "staff_attendance_save_warnings", []
+):
+    st.warning(attendance_save_warning)
 
 st.subheader(f"Daily Actions - {selected_name}")
 if active_package is None:
@@ -162,11 +176,70 @@ else:
                 st.warning("Prediction was generated, but monitoring log could not be saved.")
 
 st.subheader("After Service")
+try:
+    prediction_rows = load_prediction_logs(location_id=location_id, limit=5000)
+    current_service_date = forecast_today(locations_by_id[location_id].timezone)
+    candidate_prediction_dates = pending_prediction_service_dates(
+        prediction_rows,
+        [],
+        current_service_date,
+    )
+    past_prediction_dates = (
+        pending_prediction_service_dates(
+            prediction_rows,
+            load_clean_data(location_id)["service_date"],
+            current_service_date,
+        )
+        if candidate_prediction_dates
+        else []
+    )
+except (TimeoutError, URLError, HTTPError):
+    past_prediction_dates = None
+except Exception:
+    past_prediction_dates = None
+
+def render_pending_attendance_reminder(pending_dates) -> None:
+    if not pending_dates:
+        return
+    if len(pending_dates) == 1:
+        pending_date = pending_dates[0]
+        reminder_text, reminder_action = st.columns([4, 1])
+        reminder_text.caption(
+            f"🟡 Attendance is still needed for {pending_date:%a, %b} {pending_date.day}."
+        )
+        if reminder_action.button(
+            "Record attendance",
+            key=f"staff_record_pending_{pending_date.isoformat()}",
+        ):
+            st.session_state["staff_add_date"] = pending_date
+            st.rerun()
+    else:
+        with st.expander(
+            f"🟡 {len(pending_dates)} predicted service dates need attendance — Review",
+            expanded=False,
+        ):
+            st.caption("Choose a date to record its actual attendance.")
+            for pending_date in pending_dates:
+                pending_text, pending_action = st.columns([4, 1])
+                pending_text.write(
+                    f"{pending_date:%a, %b} {pending_date.day}"
+                )
+                if pending_action.button(
+                    "Record",
+                    key=f"staff_record_pending_{pending_date.isoformat()}",
+                ):
+                    st.session_state["staff_add_date"] = pending_date
+                    st.rerun()
+
+
+render_pending_attendance_reminder(past_prediction_dates)
+
 add_date = st.date_input("Service date", value=None, key="staff_add_date")
 add_visitors = st.number_input("Actual visitors served", min_value=0, max_value=10000, value=120, step=1)
 if st.button("Add / Update"):
     if add_date is not None:
         saved = False
+        save_warnings = []
         try:
             upsert_record(
                 str(add_date),
@@ -178,7 +251,7 @@ if st.button("Add / Update"):
             saved = True
         except RetrainingQueueError as exc:
             saved = True
-            st.warning(str(exc))
+            save_warnings.append(str(exc))
         except (TimeoutError, URLError, HTTPError):
             st.error(ATTENDANCE_SAVE_ERROR_MESSAGE)
         except Exception:
@@ -187,9 +260,13 @@ if st.button("Add / Update"):
             try:
                 update_prediction_logs_with_actual(location_id, str(add_date), int(add_visitors))
             except Exception:
-                st.warning("Attendance was saved, but monitoring log could not be updated.")
+                save_warnings.append(
+                    "Attendance was saved, but monitoring log could not be updated."
+                )
             st.session_state.pop(f"staff_full_history_{location_id}", None)
-            st.success("Saved.")
+            st.session_state["staff_attendance_save_message"] = "Saved."
+            st.session_state["staff_attendance_save_warnings"] = save_warnings
+            st.rerun()
 
 try:
     recent_attendance = load_recent_attendance(location_id, limit=7)

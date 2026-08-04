@@ -718,23 +718,26 @@ def _run_staff_pending_attendance_ui(
                 *args: Any,
                 **kwargs: Any,
             ) -> pd.DataFrame:
-                attendance.loc[len(attendance)] = {
-                    "service_date": pd.Timestamp(service_date),
-                    "visitors": visitors,
-                }
                 return attendance.copy()
+
+            def update_prediction_actual(
+                location_id: str,
+                service_date: str,
+                actual_visitors: int,
+            ) -> int:
+                for row in prediction_rows:
+                    if row.get("service_date") == service_date:
+                        row["actual_visitors"] = actual_visitors
+                return 1
 
             stack.enter_context(
                 patch("src.data_admin.upsert_record", side_effect=save_attendance)
             )
             stack.enter_context(
                 patch(
-                    "src.data_admin.load_clean_data",
-                    side_effect=lambda *args, **kwargs: attendance.copy(),
+                    "src.prediction_logs.update_prediction_logs_with_actual",
+                    side_effect=update_prediction_actual,
                 )
-            )
-            stack.enter_context(
-                patch("src.prediction_logs.update_prediction_logs_with_actual", return_value=1)
             )
         app = AppTest.from_file(str(ROOT / "app_staff.py"), default_timeout=60)
         app.session_state["user"] = {"username": "staff-test"}
@@ -781,7 +784,7 @@ def test_staff_shows_a_single_actionable_reminder_for_missing_predicted_attendan
     assert service_date.value == date(2026, 7, 12)
 
 
-def test_staff_hides_reminder_when_attendance_exists_even_if_monitoring_is_stale() -> None:
+def test_staff_shows_reminder_when_prediction_log_actual_is_missing() -> None:
     app = _run_staff_pending_attendance_ui(
         [{"service_date": "2026-07-12", "actual_visitors": None}],
         pd.DataFrame(
@@ -789,10 +792,16 @@ def test_staff_hides_reminder_when_attendance_exists_even_if_monitoring_is_stale
         ),
     )
 
+    assert "Attendance is still needed for Sun, Jul 12." in _element_text(app)
+
+
+def test_staff_hides_reminder_when_prediction_log_has_actual() -> None:
+    app = _run_staff_pending_attendance_ui(
+        [{"service_date": "2026-07-12", "actual_visitors": 100}],
+        pd.DataFrame(columns=["service_date", "visitors"]),
+    )
+
     assert "Attendance is still needed" not in _element_text(app)
-    assert not [
-        button for button in app.button if button.label == "Record attendance"
-    ]
 
 
 def test_staff_clears_the_reminder_after_saving_that_attendance() -> None:

@@ -179,19 +179,9 @@ st.subheader("After Service")
 try:
     prediction_rows = load_prediction_logs(location_id=location_id, limit=5000)
     current_service_date = forecast_today(locations_by_id[location_id].timezone)
-    candidate_prediction_dates = pending_prediction_service_dates(
+    past_prediction_dates = pending_prediction_service_dates(
         prediction_rows,
-        [],
         current_service_date,
-    )
-    past_prediction_dates = (
-        pending_prediction_service_dates(
-            prediction_rows,
-            load_clean_data(location_id)["service_date"],
-            current_service_date,
-        )
-        if candidate_prediction_dates
-        else []
     )
 except (TimeoutError, URLError, HTTPError):
     past_prediction_dates = None

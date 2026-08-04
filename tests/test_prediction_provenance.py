@@ -157,20 +157,18 @@ def test_old_prediction_output_without_provenance_still_serializes() -> None:
     assert all(row[column] is None for column in prediction_logs.PROVENANCE_COLUMN_TYPES)
 
 
-def test_pending_prediction_dates_use_attendance_as_completion_source() -> None:
+def test_pending_prediction_dates_use_prediction_log_actual_as_completion_source() -> None:
     pending = prediction_logs.pending_prediction_service_dates(
         [
             {"service_date": "2026-07-11", "actual_visitors": None},
             {"service_date": "2026-07-12", "actual_visitors": 115},
-            {"service_date": "2026-07-12", "actual_visitors": None},
             {"service_date": "2026-07-17", "actual_visitors": None},
             {"service_date": "not-a-date", "actual_visitors": None},
         ],
-        ["2026-07-11"],
         date(2026, 7, 17),
     )
 
-    assert pending == [date(2026, 7, 12)]
+    assert pending == [date(2026, 7, 11)]
 
 
 def test_supabase_missing_columns_retry_without_provenance() -> None:

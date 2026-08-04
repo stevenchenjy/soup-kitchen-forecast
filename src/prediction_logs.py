@@ -86,20 +86,14 @@ def _service_date(value: Any) -> str:
 
 def pending_prediction_service_dates(
     prediction_rows: Iterable[Mapping[str, Any]],
-    attendance_service_dates: Iterable[Any],
     as_of_date: date,
 ) -> list[date]:
-    """Return past predicted service dates that do not have attendance recorded.
+    """Return past predictions whose actual attendance has not been logged.
 
-    Prediction logs decide which dates are relevant. Attendance storage is the
-    source of truth for completion so a transient monitoring-log update failure
-    does not create a false reminder for staff.
+    The prediction log is the source of truth: a reminder remains until its
+    ``actual_visitors`` value is recorded. This lets staff correct any gap
+    between a saved attendance row and the monitoring record it should update.
     """
-    recorded_dates = {
-        _service_date(service_date)
-        for service_date in attendance_service_dates
-        if service_date is not None
-    }
     pending_dates: set[date] = set()
 
     for row in prediction_rows:
@@ -111,7 +105,7 @@ def pending_prediction_service_dates(
             service_date = date.fromisoformat(service_date_text)
         except ValueError:
             continue
-        if service_date >= as_of_date or service_date_text in recorded_dates:
+        if service_date >= as_of_date or row.get("actual_visitors") is not None:
             continue
         pending_dates.add(service_date)
 

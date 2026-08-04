@@ -188,41 +188,10 @@ except (TimeoutError, URLError, HTTPError):
 except Exception:
     past_prediction_dates = None
 
-def render_pending_attendance_reminder(pending_dates) -> None:
-    if not pending_dates:
-        return
-    if len(pending_dates) == 1:
-        pending_date = pending_dates[0]
-        reminder_text, reminder_action = st.columns([4, 1])
-        reminder_text.caption(
-            f"🟡 Attendance is still needed for {pending_date:%a, %b} {pending_date.day}."
-        )
-        if reminder_action.button(
-            "Record attendance",
-            key=f"staff_record_pending_{pending_date.isoformat()}",
-        ):
-            st.session_state["staff_add_date"] = pending_date
-            st.rerun()
-    else:
-        with st.expander(
-            f"🟡 {len(pending_dates)} predicted service dates need attendance — Review",
-            expanded=False,
-        ):
-            st.caption("Choose a date to record its actual attendance.")
-            for pending_date in pending_dates:
-                pending_text, pending_action = st.columns([4, 1])
-                pending_text.write(
-                    f"{pending_date:%a, %b} {pending_date.day}"
-                )
-                if pending_action.button(
-                    "Record",
-                    key=f"staff_record_pending_{pending_date.isoformat()}",
-                ):
-                    st.session_state["staff_add_date"] = pending_date
-                    st.rerun()
 
+def select_pending_attendance_date(pending_date) -> None:
+    st.session_state["staff_add_date"] = pending_date
 
-render_pending_attendance_reminder(past_prediction_dates)
 
 add_date = st.date_input("Service date", value=None, key="staff_add_date")
 add_visitors = st.number_input("Actual visitors served", min_value=0, max_value=10000, value=120, step=1)
@@ -257,6 +226,43 @@ if st.button("Add / Update"):
             st.session_state["staff_attendance_save_message"] = "Saved."
             st.session_state["staff_attendance_save_warnings"] = save_warnings
             st.rerun()
+
+
+def render_pending_attendance_reminder(pending_dates) -> None:
+    if not pending_dates:
+        return
+    if len(pending_dates) == 1:
+        pending_date = pending_dates[0]
+        reminder_text, reminder_action = st.columns([4, 1])
+        reminder_text.caption(
+            f"🟡 Attendance is still needed for {pending_date:%a, %b} {pending_date.day}."
+        )
+        reminder_action.button(
+            "Record attendance",
+            key=f"staff_record_pending_{pending_date.isoformat()}",
+            on_click=select_pending_attendance_date,
+            args=(pending_date,),
+        )
+    else:
+        with st.expander(
+            f"🟡 {len(pending_dates)} predicted service dates need attendance — Review",
+            expanded=False,
+        ):
+            st.caption("Choose a date to record its actual attendance.")
+            for pending_date in pending_dates:
+                pending_text, pending_action = st.columns([4, 1])
+                pending_text.write(
+                    f"{pending_date:%a, %b} {pending_date.day}"
+                )
+                pending_action.button(
+                    "Record",
+                    key=f"staff_record_pending_{pending_date.isoformat()}",
+                    on_click=select_pending_attendance_date,
+                    args=(pending_date,),
+                )
+
+
+render_pending_attendance_reminder(past_prediction_dates)
 
 try:
     recent_attendance = load_recent_attendance(location_id, limit=7)

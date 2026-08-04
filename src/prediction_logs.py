@@ -109,7 +109,7 @@ def pending_prediction_service_dates(
             continue
         pending_dates.add(service_date)
 
-    return sorted(pending_dates)
+    return sorted(pending_dates, reverse=True)
 
 
 def _secret_value(*names: str) -> str | None:

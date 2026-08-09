@@ -696,7 +696,6 @@ def _run_staff_pending_attendance_ui(
     prediction_rows: list[dict[str, Any]],
     attendance: pd.DataFrame,
     *,
-    select_single_pending_date: bool = False,
     save_date: date | None = None,
 ) -> AppTest:
     saved_logs: list[tuple[Any, ...]] = []
@@ -742,12 +741,6 @@ def _run_staff_pending_attendance_ui(
         app = AppTest.from_file(str(ROOT / "app_staff.py"), default_timeout=60)
         app.session_state["user"] = {"username": "staff-test"}
         app.run()
-        if select_single_pending_date:
-            record_button = next(
-                button for button in app.button if button.label == "Record attendance"
-            )
-            record_button.click()
-            app.run()
         if save_date is not None:
             service_date = next(
                 field for field in app.date_input if field.label == "Service date"
@@ -764,7 +757,7 @@ def _run_staff_pending_attendance_ui(
     return app
 
 
-def test_staff_shows_a_single_actionable_reminder_for_missing_predicted_attendance() -> None:
+def test_staff_shows_a_single_reminder_without_an_action_button() -> None:
     app = _run_staff_pending_attendance_ui(
         [
             {"service_date": "2026-07-12", "actual_visitors": None},
@@ -773,15 +766,14 @@ def test_staff_shows_a_single_actionable_reminder_for_missing_predicted_attendan
         pd.DataFrame(
             {"service_date": pd.to_datetime(["2026-07-11"]), "visitors": [100]}
         ),
-        select_single_pending_date=True,
     )
 
     assert "Attendance is still needed for Sun, Jul 12." in _element_text(app)
-
-    service_date = next(
-        field for field in app.date_input if field.label == "Service date"
-    )
-    assert service_date.value == date(2026, 7, 12)
+    assert not [
+        button
+        for button in app.button
+        if button.label in {"Record attendance", "Record"}
+    ]
 
 
 def test_staff_shows_reminder_when_prediction_log_actual_is_missing() -> None:

@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "studies": [
+    {
+      "location_id": "ny_12550",
+      "study_id": "weather_11_13_v1",
+      "timezone": "America/New_York",
+      "anchor_local_time": "10:00",
+      "lead_hours": 12,
+      "duration_basis": "elapsed_utc",
+      "start_minutes_before_cutoff": 5,
+      "capture_window_minutes": 15,
+      "candidate": "models/candidates/ny_12550_weather_shadow_2026-09-13_v1",
+      "local_store": "data/weather_shadow/ny_12550.sqlite"
+    }
+  ]
+}

@@ -24,6 +24,7 @@ Soup kitchens often need to plan meals before they know exactly how many visitor
 - Backtest outputs, metrics, and charts for model review.
 - Prediction logging and actual-attendance reconciliation.
 - Nightly retraining workflow for Supabase-backed deployments.
+- Optional prospective weather comparison alongside F6, with immutable forecast snapshots and preparation-cutoff checks. See [weather study setup](docs/weather_shadow_study.md).
 
 ## Repository Structure
 

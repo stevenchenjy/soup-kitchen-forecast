@@ -49,6 +49,9 @@ data/updated/*.csv
 models/*.joblib
 models/*.pkl
 models/*.pickle
+# Local weather-study candidates and immutable forecast snapshots.
+models/candidates/*weather_shadow*/
+data/weather_shadow/
 
 # Generated artifacts and run outputs
 artifacts/

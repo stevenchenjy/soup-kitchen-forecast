@@ -7,7 +7,7 @@ from src.config import ForecastTargetDateError, model_file_for_location, parse_s
 from src.predictor import VisitorPredictor, WeatherForecastUnavailableError
 
 app = FastAPI(title="Visitor Forecast API", version="2.0.0")
-_predictor_cache: dict[str, VisitorPredictor] = {}
+_predictor_cache: dict[str, tuple[tuple, VisitorPredictor]] = {}
 
 
 class PredictRequest(BaseModel):
@@ -18,13 +18,29 @@ class PredictRequest(BaseModel):
 
 
 def _get_predictor(location_id: str) -> VisitorPredictor:
-    if location_id in _predictor_cache:
-        return _predictor_cache[location_id]
-    model_path = model_file_for_location(location_id)
-    if not Path(model_path).exists():
+    model_path = Path(model_file_for_location(location_id)).resolve()
+    try:
+        stat = model_path.stat()
+    except FileNotFoundError:
+        _predictor_cache.pop(location_id, None)
         raise HTTPException(status_code=404, detail=f"Model not found for location: {location_id}")
+    signature = (str(model_path), stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+    cached = _predictor_cache.get(location_id)
+    if cached is not None and cached[0] == signature:
+        return cached[1]
     p = VisitorPredictor(str(model_path))
-    _predictor_cache[location_id] = p
+    # Nightly publication replaces the file atomically. Do not associate a
+    # package loaded during replacement with the identity of another version.
+    try:
+        after = model_path.stat()
+    except FileNotFoundError:
+        after = None
+    if after is None or signature != (
+        str(model_path), after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns
+    ):
+        _predictor_cache.pop(location_id, None)
+        raise HTTPException(status_code=503, detail="Model changed while loading; retry the request.")
+    _predictor_cache[location_id] = (signature, p)
     return p
 
 

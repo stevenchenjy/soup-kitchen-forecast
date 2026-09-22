@@ -4,6 +4,7 @@ import hashlib
 from pathlib import Path
 from unittest.mock import Mock
 
+import joblib
 import pandas as pd
 import pytest
 
@@ -15,13 +16,17 @@ from src.weather_snapshots import HOURLY_UNITS, extract_weather_features, snapsh
 
 pytestmark = pytest.mark.filterwarnings("ignore:Setting the shape on a NumPy array has been deprecated:DeprecationWarning")
 
-BASELINE = PROJECT_ROOT / "models/visitor_model_ny_12550.joblib"
+# Fixed-clock tests must use a fixed package. The active package advances after
+# nightly training and correctly fails the historical-origin leakage guard.
+BASELINE = PROJECT_ROOT / "models/candidates/ny_12550_f6_2026-07-12_v1/model_package.joblib"
+ACTIVE_MODEL = PROJECT_ROOT / "models/visitor_model_ny_12550.joblib"
 START = datetime(2026, 9, 18, 12, 55, tzinfo=timezone.utc)
 CUTOFF = START + timedelta(minutes=5)
 
 
 @pytest.fixture
 def setup_capture(tmp_path, monkeypatch):
+    monkeypatch.setattr(shadow, "model_file_for_location", lambda _: BASELINE)
     clock = Mock(return_value=START)
     store = Mock()
     candidate = tmp_path / "weather_candidate.joblib"
@@ -31,7 +36,7 @@ def setup_capture(tmp_path, monkeypatch):
         "created_at_utc": "2026-09-17T00:00:00+00:00",
         "training_weather": "realized_historical_bootstrap",
         "history": {"sha256": history_sha256(VisitorPredictor(str(BASELINE)).history_df)},
-        "training_end_date": "2026-09-06",
+        "training_end_date": "2026-07-12",
         "weather_context": {"latitude": 41.50343, "longitude": -74.01042},
     }
     loader = Mock(return_value=package)
@@ -73,7 +78,7 @@ def saved(record):
 
 def test_pair_matches_production_and_shares_attendance_row(setup_capture, monkeypatch):
     candidate, clock, store, _, _, predict_candidate, _ = setup_capture
-    active_before = hashlib.sha256(BASELINE.read_bytes()).hexdigest()
+    active_before = hashlib.sha256(ACTIVE_MODEL.read_bytes()).hexdigest()
     record = capture(setup_capture)
     monkeypatch.setattr("src.config.forecast_today", lambda *_: date(2026, 9, 18))
     live = VisitorPredictor(str(BASELINE)).predict_next("2026-09-19")
@@ -84,7 +89,20 @@ def test_pair_matches_production_and_shares_attendance_row(setup_capture, monkey
     for key, value in record["payload"]["f6_features"].items():
         assert (pd.isna(x.iloc[0][key]) if value is None else x.iloc[0][key] == value)
     store.append.assert_called_once_with(record)
-    assert hashlib.sha256(BASELINE.read_bytes()).hexdigest() == active_before
+    assert hashlib.sha256(ACTIVE_MODEL.read_bytes()).hexdigest() == active_before
+
+
+def test_baseline_trained_after_origin_is_rejected_before_weather(setup_capture, tmp_path):
+    package = joblib.load(BASELINE)
+    history = package["history_df"].copy()
+    history.loc[history.index[-1], "service_date"] = pd.Timestamp("2026-09-20")
+    package["history_df"] = history
+    future_baseline = tmp_path / "future_baseline.joblib"
+    joblib.dump(package, future_baseline)
+    with pytest.raises(ValueError, match="attendance after the forecast origin"):
+        capture(setup_capture, baseline_path=future_baseline)
+    setup_capture[-1].assert_not_called()
+    setup_capture[2].append.assert_not_called()
 
 
 def test_weather_failure_retains_baseline_and_logs_failure(setup_capture):

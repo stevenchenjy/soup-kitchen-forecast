@@ -1,30 +1,40 @@
 # Soup Kitchen Visitor Forecast and Meal Prep Assistant
 
-## Project Description
+## What this project does
 
-This system helps soup kitchens forecast visitor attendance and make meal prep recommendations so teams can prepare enough food for guests while reducing avoidable food waste. It combines historical attendance data, location-specific weather context, and backtested forecasting models to support practical daily decisions for admin and staff users.
+Meal preparation starts before a kitchen knows how many guests will arrive. This project turns historical attendance into visitor forecasts and suggested meal counts, giving staff a starting point for balancing enough food with avoidable over-preparation.
 
-## Overview
+There are two Streamlit dashboards: one for staff to view recommendations and record attendance, and one for administrators to manage locations, accounts, data, and model monitoring. The repository contains the application, forecasting code, a bundled model for `ny_12550`, and backtest artifacts. Backtests evaluate forecasts; measured food-waste reduction has not been established here.
 
-Soup kitchens often need to plan meals before they know exactly how many visitors will arrive. Preparing too little can leave guests underserved, while preparing too much can waste food, staff time, and budget. This project provides a lightweight forecasting workflow for multi-location meal programs:
+If you are visiting from my [personal website](https://stevenchenjy.github.io/), start with the workflow below. For implementation and local setup, continue to [Run locally](#run-locally).
 
-- Admin users manage locations, attendance records, users, training runs, and diagnostics.
-- Staff users view authorized locations, record attendance, and receive meal prep recommendations.
-- Forecasts are trained per location so each kitchen can keep its own attendance, weather cache, model file, and backtest artifacts.
-- Optional Supabase configuration supports shared deployment storage; local SQLite and JSON storage support local demos and development.
+## A typical workflow
+
+1. Choose an authorized location and a Saturday or Sunday service date.
+2. View the attendance forecast and suggested number of meals.
+3. Record actual attendance after the service.
+4. Compare predictions with actual attendance in the monitoring dashboard.
+
+Attendance, model packages, and generated outputs are organized by location. Local SQLite and JSON storage support development; optional Supabase storage supports shared deployments.
+
+## How recommendations work
+
+The current dashboards require a valid locked **F6** model package. For the bundled `ny_12550` model, F6 uses attendance-history and calendar features with separate Saturday and Sunday models. Its **C0** recommendation policy rounds the model's raw 80th-percentile prediction up to a whole meal count; it does not add an adjustable percentage or residual buffer.
+
+Weather-based models and the earlier percentage-buffer calculation remain in the repository for separate research and legacy workflows. Open-Meteo weather access needs no API key, but live weather is not an input to the locked F6 recommendation path. An optional prospective weather comparison records forecast snapshots and checks preparation cutoffs alongside F6; see the [weather study documentation](docs/weather_shadow_study.md).
 
 ## Features
 
 - Role-based Streamlit apps for admin and staff workflows.
 - Multi-location configuration through `data/locations.json`.
 - Per-location attendance storage using local SQLite or Supabase.
-- Visitor forecasts with suggested meal counts and configurable safety buffer.
+- Visitor forecasts and meal recommendations with model-package integrity checks.
 - Saturday and Sunday model segmentation with rolling backtests.
-- Weather feature integration through Open-Meteo APIs, with no API key required.
+- Separate weather-feature research through Open-Meteo APIs.
 - Backtest outputs, metrics, and charts for model review.
 - Prediction logging and actual-attendance reconciliation.
 - Nightly retraining workflow for Supabase-backed deployments.
-- Optional prospective weather comparison alongside F6, with immutable forecast snapshots and preparation-cutoff checks. See [weather study setup](docs/weather_shadow_study.md).
+- Prediction provenance and comparison of backtest evidence with live observations.
 
 ## Repository Structure
 
@@ -41,14 +51,6 @@ Soup kitchens often need to plan meals before they know exactly how many visitor
 └── DEPLOYMENT.md                  # Runtime and Streamlit Cloud deployment notes
 ```
 
-## Screenshots
-
-Add updated screenshots before publishing or presenting the project:
-
-- Admin dashboard overview: `docs/screenshots/admin-dashboard.png`
-- Staff meal prep recommendation: `docs/screenshots/staff-recommendation.png`
-- Backtest metrics and charts: `docs/screenshots/backtest-results.png`
-
 ## Requirements
 
 - Python 3.12
@@ -58,9 +60,9 @@ Add updated screenshots before publishing or presenting the project:
 
 Use Python 3.12 for local development and deployment. See `DEPLOYMENT.md` for additional runtime notes.
 
-## Local Setup
+## Run locally
 
-Create and activate a virtual environment:
+From the repository root, create and activate a virtual environment:
 
 ```bash
 python -m venv .venv
@@ -68,13 +70,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Train or refresh a model for a configured location:
-
-```bash
-python scripts/train_backtest.py --location ny_12550
-```
-
-Run the admin dashboard:
+Start with the bundled F6 model; no retraining is needed just to open the dashboards. Run the admin dashboard:
 
 ```bash
 streamlit run app.py --server.port 8501
@@ -86,7 +82,9 @@ Run the staff dashboard:
 streamlit run app_staff.py --server.port 8502
 ```
 
-The app can run locally with the bundled demo data and generated local files. Generated SQLite databases, weather caches, models, and artifacts should be treated as local outputs unless intentionally published.
+Open `http://localhost:8501` for the admin dashboard and `http://localhost:8502` for the staff dashboard. Sign-in is required; the staff view is restricted to assigned locations. These are local development entry points, not a public live-demo link.
+
+Generated SQLite databases, weather caches, models, and artifacts should be treated as local outputs unless intentionally published.
 
 ## Local Demo Access
 
@@ -99,7 +97,7 @@ Before deploying the app for shared or public use:
 - Store production credentials and Supabase keys in Streamlit secrets or environment variables.
 - Do not publish real passwords, service-role keys, or `.env` files.
 
-## Data and Model Workflow
+## Data and model maintenance
 
 Location settings live in `data/locations.json`. Each location has an ID, display name, zip code, country code, and timezone.
 
@@ -122,17 +120,11 @@ models/visitor_model_<location_id>.joblib
 artifacts/<location_id>/
 ```
 
-Run a one-location training job:
+For the current F6 workflow, read the [candidate verification](docs/f6_stage2_candidate_verification.md), [parity/readiness](docs/f6_stage3_4_activation_readiness.md), and [activation record](docs/f6_stage5_activation.md) before changing an active model. Candidate generation and model publication are separate operations.
 
-```bash
-python scripts/train_backtest.py --location ny_12550
-```
+`scripts/train_backtest.py` is the legacy schema-v1 training path. It writes directly to a location's active model file. Do not run it over the active `ny_12550` F6 package as a setup or refresh step: the current dashboard integrity check will not accept that legacy package as F6. The same distinction matters when adding a location; configuration alone does not provide a dashboard-ready F6 model.
 
-Run the incremental retraining entrypoint for one location:
-
-```bash
-python scripts/retrain_incremental.py --location ny_12550
-```
+The compatibility entry point `scripts/retrain_incremental.py` delegates to that same legacy training path and carries the same restriction.
 
 For Supabase-backed deployments, the nightly retraining script can check dirty locations and retrain only when attendance changes:
 
@@ -140,7 +132,7 @@ For Supabase-backed deployments, the nightly retraining script can check dirty l
 python scripts/nightly_retrain.py --all
 ```
 
-## Add a Location
+## Location configuration
 
 Edit `data/locations.json` and add a location:
 
@@ -154,13 +146,7 @@ Edit `data/locations.json` and add a location:
 }
 ```
 
-Then train that location:
-
-```bash
-python scripts/train_backtest.py --location la_90012
-```
-
-After training, the location will be available in the app location list.
+The location appears in the configured location list, but attendance history, authorized users, and an appropriate validated model package are also needed for a usable forecast. The example above changes configuration only.
 
 ## Deployment Notes
 

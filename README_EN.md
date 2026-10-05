@@ -1,5 +1,3 @@
 # English README
 
-The standard project README is now maintained in `README.md`.
-
-It includes the current project overview, local setup steps, safer local-demo credential guidance, model training workflow, deployment notes, and screenshot placeholders.
+The maintained English documentation is in [README.md](README.md), including the project overview, current model workflow, local setup, and deployment notes.

@@ -1,11 +1,11 @@
 {
   "overall": {
-    "MAE": 13.593537543154198,
-    "RMSE": 17.644294959619476,
-    "MAPE": 0.10381052532516595,
-    "Bias": 0.14650792898687706,
-    "P90AbsError": 29.46927928365572,
-    "BacktestRows": 345
+    "MAE": 13.586496128071568,
+    "RMSE": 17.62898609729809,
+    "MAPE": 0.10371203406563811,
+    "Bias": 0.1138382299881737,
+    "P90AbsError": 29.46838407480773,
+    "BacktestRows": 346
   },
   "sat": {
     "MAE": 13.623333854878727,
@@ -16,15 +16,15 @@
     "BacktestRows": 175
   },
   "sun": {
-    "MAE": 13.562864869320132,
-    "RMSE": 17.947499261610194,
-    "MAPE": 0.08874762601724889,
-    "Bias": -0.4073361973106997,
-    "P90AbsError": 28.49704324297029,
-    "BacktestRows": 170
+    "MAE": 13.548796700052556,
+    "RMSE": 17.91527287037298,
+    "MAPE": 0.08863642673953707,
+    "Bias": -0.47020094425370434,
+    "P90AbsError": 28.407097222222262,
+    "BacktestRows": 171
   },
   "_f6_package_provenance": {
-    "package_id": "ny_12550_f6_nightly_2026-10-03_c0a46ddc8901_r37203983589a1_v1",
+    "package_id": "ny_12550_f6_nightly_2026-10-04_ee29c12b5084_r37473828859a1_v1",
     "model_package_schema_version": 2,
     "feature_set_id": "F6_COMPACT_SELECTED",
     "feature_order_sha256": "dac868ae1a739cbee55443a953c6ab5c45876e158e40b57300ffe1c9607f7419",

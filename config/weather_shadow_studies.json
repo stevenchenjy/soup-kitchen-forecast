@@ -10,7 +10,7 @@
       "duration_basis": "elapsed_utc",
       "start_minutes_before_cutoff": 5,
       "capture_window_minutes": 15,
-      "candidate": "models/candidates/ny_12550_weather_shadow_2026-09-13_v1",
+      "candidate": "models/candidates/ny_12550_weather_shadow_2026-09-22_v1",
       "local_store": "data/weather_shadow/ny_12550.sqlite"
     }
   ]

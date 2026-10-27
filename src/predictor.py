@@ -11,6 +11,7 @@ import src.config as config
 from src.config import DATE_COL, validate_forecast_target_date
 from src.data_processing import infer_next_service_date
 from src.features import add_basic_calendar_features, add_lag_features, merge_weather_features
+from src.meal_policy import load_preparation_policy, raw_preparation_policy
 from src.production_features import (
     MODEL_PACKAGE_SCHEMA_VERSION,
     RECOMMENDATION_POLICY_ID,
@@ -38,6 +39,9 @@ class PredictionOutput:
     forecast_origin: pd.Timestamp | None = None
     calendar_days_ahead: int | None = None
     service_horizon: int | None = None
+    base_recommendation_policy_id: str | None = None
+    raw_recommended_meals: int | None = None
+    meal_reduction: int = 0
 
 
 class WeatherForecastUnavailableError(RuntimeError):
@@ -45,9 +49,13 @@ class WeatherForecastUnavailableError(RuntimeError):
 
 
 class VisitorPredictor:
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: str, *, apply_preparation_policy: bool = True):
         pack = joblib.load(model_path)
         self.model_path = str(Path(model_path))
+        location_id = pack.get("location_id")
+        self.location_id = location_id if isinstance(location_id, str) else None
+        self.preparation_policy = raw_preparation_policy()
+        self.meal_policy_config_fingerprint = None
         self.models = pack["models"]
         self.quantile_models = pack["quantile_models"]
         self.feature_cols = pack["feature_cols"]
@@ -99,6 +107,11 @@ class VisitorPredictor:
             self.recommendation_policy_id = pack.get("recommendation_policy_id")
             if self.recommendation_policy_id != RECOMMENDATION_POLICY_ID:
                 raise ValueError("F6 model package recommendation policy is not locked C0")
+            if apply_preparation_policy and self.location_id:
+                self.preparation_policy = load_preparation_policy(self.location_id)
+                self.meal_policy_config_fingerprint = (
+                    self.preparation_policy.config_fingerprint
+                )
         else:
             if self.feature_contract is not None:
                 raise ValueError("Schema-v1 model packages cannot declare an F6 feature contract")
@@ -227,12 +240,27 @@ class VisitorPredictor:
                 pred_point + residual_buf,
             )
 
+        raw_meals = int(np.ceil(suggested))
+        base_policy_id = getattr(
+            self, "recommendation_policy_id", "LEGACY_MAX_OF_POINT_QUANTILE_AND_BUFFERS"
+        )
+        effective_policy_id = base_policy_id
+        meal_reduction = 0
+        recommended_meals = raw_meals
+        if base_policy_id == RECOMMENDATION_POLICY_ID:
+            preparation_policy = getattr(
+                self, "preparation_policy", raw_preparation_policy()
+            ).for_date(dt)
+            recommended_meals = preparation_policy.apply(raw_meals)
+            effective_policy_id = preparation_policy.policy_id
+            meal_reduction = preparation_policy.reduction_meals
+
         return PredictionOutput(
             service_date=dt,
             predicted_visitors=pred_point,
             predicted_quantile=pred_q,
             residual_buffer=residual_buf,
-            suggested_meals=int(np.ceil(suggested)),
+            suggested_meals=recommended_meals,
             meal_buffer_pct=buffer_pct,
             model_segment=segment,
             package_id=getattr(self, "package_id", None),
@@ -249,12 +277,11 @@ class VisitorPredictor:
                 if isinstance(getattr(self, "feature_contract", None), dict)
                 else None
             ),
-            recommendation_policy_id=getattr(
-                self,
-                "recommendation_policy_id",
-                "LEGACY_MAX_OF_POINT_QUANTILE_AND_BUFFERS",
-            ),
+            recommendation_policy_id=effective_policy_id,
             forecast_origin=forecast_origin,
             calendar_days_ahead=calendar_days_ahead,
             service_horizon=service_horizon,
+            base_recommendation_policy_id=base_policy_id,
+            raw_recommended_meals=raw_meals,
+            meal_reduction=meal_reduction,
         )

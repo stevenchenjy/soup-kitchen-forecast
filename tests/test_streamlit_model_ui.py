@@ -289,6 +289,7 @@ def _configure_common_patches(
     retrain_state: dict[str, Any] | None = None,
     latest_run: dict[str, Any] | None = None,
     latest_successful_run: dict[str, Any] | None = None,
+    forecast_origin: date = date(2026, 7, 17),
 ) -> None:
     users = [user]
     attendance = ATTENDANCE if attendance_frame is None else attendance_frame
@@ -344,7 +345,7 @@ def _configure_common_patches(
         patch("src.config.artifact_dir_for_location", return_value=artifact_dir)
     )
     stack.enter_context(
-        patch("src.config.forecast_today", return_value=date(2026, 7, 17))
+        patch("src.config.forecast_today", return_value=forecast_origin)
     )
 
     stack.enter_context(
@@ -434,6 +435,7 @@ def _run_prediction_ui(
     model_path: Path,
     target_date: str,
     f6: bool,
+    forecast_origin: date = date(2026, 7, 17),
 ) -> dict[str, Any]:
     saved_logs: list[tuple[Any, ...]] = []
     with (
@@ -454,6 +456,7 @@ def _run_prediction_ui(
             artifact_dir=Path(artifact_directory),
             saved_logs=saved_logs,
             f6=f6,
+            forecast_origin=forecast_origin,
         )
 
         direct_predictor = VisitorPredictor(str(model_path))
@@ -505,6 +508,9 @@ def _run_prediction_ui(
             "slider_labels": [element.label for element in app.slider],
             "metric_labels": [element.label for element in app.metric],
             "prediction": prediction_signature(logged_prediction),
+            "effective_policy_id": logged_prediction.recommendation_policy_id,
+            "meal_reduction": logged_prediction.meal_reduction,
+            "raw_recommended_meals": logged_prediction.raw_recommended_meals,
             "technical_details": (
                 None
                 if technical_expander is None
@@ -905,6 +911,28 @@ def test_active_f6_admin_and_staff_prediction_paths(
                 "model storage",
             )
         )
+
+
+@pytest.mark.parametrize("app_filename,role", [("app.py", "master"), ("app_staff.py", "staff")])
+@pytest.mark.parametrize("target_date", ["2026-10-31", "2026-11-01"])
+def test_equal_weight_plan_is_rendered_and_logged_by_both_apps(app_filename, role, target_date):
+    result = _run_prediction_ui(
+        app_filename=app_filename,
+        role=role,
+        model_path=ACTIVE_MODEL,
+        target_date=target_date,
+        f6=True,
+        forecast_origin=date(2026, 10, 26),
+    )
+    assert result["effective_policy_id"] == "P1_EQUAL_WEIGHT_Q80_MINUS_7"
+    assert result["meal_reduction"] == 7
+    assert result["prediction"]["suggested_meals"] == max(
+        0, result["raw_recommended_meals"] - 7
+    )
+    assert "Meal recommendations balance excess meals and shortages equally." in result["rendered_text"]
+    assert "built-in safety margin" not in result["rendered_text"]
+    if app_filename == "app_staff.py":
+        assert "P1_EQUAL_WEIGHT" not in result["rendered_text"]
 
 
 def test_admin_monitoring_separates_backtest_live_and_operational_scopes() -> None:

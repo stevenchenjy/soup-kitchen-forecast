@@ -170,6 +170,116 @@ def test_schema_v2_synthetic_package_uses_f6_w0_and_locked_c0(tmp_path: Path) ->
     assert prediction.residual_buffer == 0.0
 
 
+@pytest.mark.parametrize(
+    "target,origin,point,q80,raw_meals,prepared",
+    [
+        ("2026-10-31", date(2026, 10, 30), 100, 120.2, 121, 114),
+        ("2026-11-01", date(2026, 10, 30), 110, 125.2, 126, 119),
+        ("2026-11-07", date(2026, 10, 23), 100, 120.2, 121, 114),
+    ],
+)
+def test_preparation_policy_changes_only_final_meals_across_days_and_horizons(
+    tmp_path, target, origin, point, q80, raw_meals, prepared
+):
+    package = f6_package()
+    package["location_id"] = "ny_12550"
+    path = tmp_path / "f6.joblib"
+    joblib.dump(package, path)
+    predictor = VisitorPredictor(str(path))
+    with patch("src.config.forecast_today", return_value=origin), patch(
+        "src.predictor.WeatherClient.fetch_forecast_daily"
+    ) as fetch_weather:
+        output = predictor.predict_next(target)
+    fetch_weather.assert_not_called()
+    assert predictor.recommendation_policy_id == RECOMMENDATION_POLICY_ID
+    assert output.predicted_visitors == point
+    assert output.predicted_quantile == q80
+    assert output.raw_recommended_meals == raw_meals
+    assert output.suggested_meals == prepared
+    assert output.meal_reduction == 7
+    assert output.base_recommendation_policy_id == RECOMMENDATION_POLICY_ID
+    assert output.recommendation_policy_id == "P1_EQUAL_WEIGHT_Q80_MINUS_7"
+    assert output.meal_buffer_pct == output.residual_buffer == 0
+
+
+@pytest.mark.parametrize("q80,expected", [(6.2, 0), (7.0, 0), (7.1, 1), (120.0, 113)])
+def test_preparation_reduction_is_after_rounding_and_clipped_at_zero(tmp_path, q80, expected):
+    package = f6_package()
+    package["location_id"] = "ny_12550"
+    package["quantile_models"]["sat"] = ConstantModel(q80)
+    path = tmp_path / "f6.joblib"
+    joblib.dump(package, path)
+    predictor = VisitorPredictor(str(path))
+    with patch("src.config.forecast_today", return_value=date(2026, 10, 30)):
+        output = predictor.predict_next("2026-10-31")
+    assert output.predicted_quantile == q80
+    assert output.raw_recommended_meals == int(np.ceil(q80))
+    assert output.suggested_meals == expected
+
+
+def test_explicit_raw_mode_preserves_research_predictions_and_skips_config(tmp_path):
+    package = f6_package()
+    package["location_id"] = "ny_12550"
+    path = tmp_path / "f6.joblib"
+    joblib.dump(package, path)
+    with patch("src.predictor.load_preparation_policy", side_effect=AssertionError("raw mode")):
+        predictor = VisitorPredictor(str(path), apply_preparation_policy=False)
+    with patch("src.config.forecast_today", return_value=date(2026, 10, 30)):
+        output = predictor.predict_next("2026-10-31")
+    assert output.suggested_meals == output.raw_recommended_meals == 121
+    assert output.recommendation_policy_id == RECOMMENDATION_POLICY_ID
+    assert output.meal_reduction == 0
+    assert predictor.meal_policy_config_fingerprint is None
+
+
+@pytest.mark.parametrize("location", [None, "nyc_10001"])
+def test_preparation_policy_requires_an_explicit_configured_package_location(tmp_path, location):
+    package = f6_package()
+    if location is not None:
+        package["location_id"] = location
+    path = tmp_path / "visitor_model_ny_12550.joblib"
+    joblib.dump(package, path)
+    predictor = VisitorPredictor(str(path))
+    with patch("src.config.forecast_today", return_value=date(2026, 10, 30)):
+        output = predictor.predict_next("2026-10-31")
+    assert output.suggested_meals == 121
+    assert output.recommendation_policy_id == RECOMMENDATION_POLICY_ID
+    assert output.meal_reduction == 0
+
+
+def test_configured_location_keeps_historical_c0_before_release(tmp_path):
+    package = f6_package()
+    package["location_id"] = "ny_12550"
+    path = tmp_path / "f6.joblib"
+    joblib.dump(package, path)
+    predictor = VisitorPredictor(str(path))
+    with patch("src.config.forecast_today", return_value=date(2026, 10, 23)):
+        output = predictor.predict_next("2026-10-25")
+    assert output.suggested_meals == 126
+    assert output.recommendation_policy_id == RECOMMENDATION_POLICY_ID
+    assert output.meal_reduction == 0
+
+
+def test_legacy_location_keeps_its_original_buffer_policy(tmp_path):
+    package = f6_package()
+    package.update(location_id="ny_12550", model_package_schema_version=1)
+    package.pop("feature_contract")
+    package["default_meal_buffer_pct"] = 0.08
+    package["residual_buffer_by_day"] = {"sat": 30.0, "sun": 30.0}
+    path = tmp_path / "legacy.joblib"
+    joblib.dump(package, path)
+    predictor = VisitorPredictor(str(path))
+    with patch("src.config.forecast_today", return_value=date(2026, 10, 30)), patch.object(
+        predictor, "_prepare_one_row", return_value=pd.DataFrame(
+            np.zeros((1, len(LOCKED_F6_FEATURES))), columns=LOCKED_F6_FEATURES
+        )
+    ):
+        output = predictor.predict_next("2026-10-31")
+    assert output.suggested_meals == output.raw_recommended_meals == 130
+    assert output.meal_reduction == 0
+    assert output.recommendation_policy_id == "LEGACY_MAX_OF_POINT_QUANTILE_AND_BUFFERS"
+
+
 def test_schema_v2_rejects_feature_order_drift(tmp_path: Path) -> None:
     package = f6_package()
     package["feature_cols"] = list(reversed(package["feature_cols"]))

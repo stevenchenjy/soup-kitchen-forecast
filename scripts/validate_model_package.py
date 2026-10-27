@@ -60,6 +60,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--expected-sha256", required=True)
     parser.add_argument("--package-id")
     parser.add_argument("--smoke", action="append", type=_parse_smoke, default=[])
+    parser.add_argument(
+        "--apply-preparation-policy", action="store_true",
+        help="Also apply the configured operational meal plan to smoke predictions.",
+    )
     return parser.parse_args()
 
 
@@ -82,7 +86,9 @@ def main() -> int:
             validation = validate_legacy_package_file(
                 path, expected_sha256=args.expected_sha256
             )
-        predictor = VisitorPredictor(str(path))
+        predictor = VisitorPredictor(
+            str(path), apply_preparation_policy=args.apply_preparation_policy
+        )
 
     signatures = []
     for target, origin in args.smoke:

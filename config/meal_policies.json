@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "evaluation": {
+    "evidence_path": "config/meal_policy_evaluations/equal_weight_2026-10-26.json",
+    "evidence_sha256": "13aa78bb05b984e3286e4183dc7443297ee9fe1c669feb07122d0e8c3e3428d5"
+  },
+  "policies": {
+    "ny_12550": {
+      "policy_id": "P1_EQUAL_WEIGHT_Q80_MINUS_7",
+      "base_policy_id": "C0_EXISTING_RAW_QUANTILE",
+      "reduction_meals": 7,
+      "effective_from_service_date": "2026-10-31",
+      "objective": "Equal weight for one excess meal and one meal below attendance",
+      "evaluation_date": "2026-10-26",
+      "evaluation_status": "passed"
+    }
+  }
+}

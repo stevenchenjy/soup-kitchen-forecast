@@ -19,7 +19,9 @@ Attendance, model packages, and generated outputs are organized by location. Loc
 
 ## How recommendations work
 
-The current dashboards require a valid locked **F6** model package. For the bundled `ny_12550` model, F6 uses attendance-history and calendar features with separate Saturday and Sunday models. Its **C0** recommendation policy rounds the model's raw 80th-percentile prediction up to a whole meal count; it does not add an adjustable percentage or residual buffer.
+The current dashboards require a valid locked **F6** model package. For the bundled `ny_12550` model, F6 uses attendance-history and calendar features with separate Saturday and Sunday models. The package's **C0** baseline rounds the raw 80th-percentile prediction up to a whole meal count, with no adjustable percentage or residual buffer.
+
+For Newburgh services from **October 31, 2026**, the final preparation target uses the approved **equal-weight plan**: `max(0, ceil(raw Q80) - 7)`. Excess meals and shortfalls have equal cost in this plan's evaluation. The visitor forecast and raw Q80 remain unchanged. The shared [preparation policy configuration](config/meal_policies.json) applies to staff, admin, and API predictions and persists across nightly model refreshes. Historical raw-Q80 backtests retain their original meaning. See the [evaluation and operating tradeoff](docs/meal_preparation_policy.md), including the increase in potential shortfalls.
 
 Weather-based models and the earlier percentage-buffer calculation remain in the repository for separate research and legacy workflows. Open-Meteo weather access needs no API key, but live weather is not an input to the locked F6 recommendation path. An optional prospective weather comparison records forecast snapshots and checks preparation cutoffs alongside F6; see the [weather study documentation](docs/weather_shadow_study.md).
 

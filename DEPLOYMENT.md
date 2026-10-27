@@ -37,3 +37,26 @@ projects.
 
 The `runtime.txt` file documents the preferred runtime, but Streamlit Cloud Python version should
 still be confirmed in the app's Advanced settings.
+
+## Preparation policy releases
+
+`config/meal_policies.json` is a versioned operating policy applied by
+`VisitorPredictor` after the raw model recommendation is rounded. It is scoped to
+an explicit package location and service date. Deploy it with the application
+source to both apps on `main`; the API also includes its configuration fingerprint
+in cache invalidation. Nightly training and raw F6/C0 package validation remain
+independent of this operating adjustment.
+
+Apply `supabase/migrations/20260716_add_prediction_model_provenance.sql` before
+releasing a new preparation policy. It adds nullable provenance columns without
+rewriting historical rows. Verify a normal future-service prediction saves its
+effective `recommendation_policy_id`, package ID, and origin, in addition to the
+adjusted meal count. Old rows with unknown provenance must remain unknown.
+
+For the equal-weight release, verify both October 31 and November 1 predictions
+match `max(0, ceil(predicted_quantile) - 7)`, have zero extra buffers, and record
+`P1_EQUAL_WEIGHT_Q80_MINUS_7`. Check the actual staff/admin views and the API,
+and confirm raw package-validation and weather-shadow paths still use C0.
+Rollback the preparation adjustment by reverting the policy configuration and
+redeploying; no attendance changes or model retraining are required. Recompute
+future recommendations through the normal workflow after a policy change.

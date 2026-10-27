@@ -109,7 +109,9 @@ def capture_shadow_forecast(
 
     path = Path(baseline_path) if baseline_path is not None else model_file_for_location(location_id)
     before_hash = _sha256(path)
-    baseline = VisitorPredictor(str(path))
+    # Shadow comparisons retain their registered raw-Q80 baseline. The staff
+    # preparation policy is a separate operating decision.
+    baseline = VisitorPredictor(str(path), apply_preparation_policy=False)
     if before_hash != _sha256(path):
         raise ValueError("Active F6 package changed while loading; retry before cutoff.")
     if not baseline.uses_locked_f6:

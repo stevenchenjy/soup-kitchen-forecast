@@ -64,6 +64,7 @@ from src.prediction_logs import (
     update_prediction_logs_with_actual,
 )
 from src.predictor import VisitorPredictor, WeatherForecastUnavailableError
+from src.recommendation_ui import recommendation_ui_policy
 
 st.set_page_config(page_title="Multi-Location Forecast Admin", layout="wide")
 
@@ -168,9 +169,7 @@ def render_prediction():
         st.caption(f6_integrity_error or "The active F6 contract is unavailable.")
         return
 
-    st.caption(
-        "Recommended meals include a built-in safety margin based on expected attendance."
-    )
+    st.caption(recommendation_ui_policy(predictor).recommendation_caption)
     custom_date = st.text_input(
         "Target service date (Sat/Sun, YYYY-MM-DD)", value=""
     )
@@ -269,7 +268,7 @@ def render_model_monitoring():
     st.markdown("### Active Model")
     st.success(
         f"Forecast model active · Trained through {trained_through} · "
-        "Raw Q80 recommendation"
+        f"{recommendation_ui_policy(predictor).preparation_label}"
     )
     with st.expander("Technical details", expanded=False):
         st.markdown(f"**Package ID:** `{active_package.package_id}`")
@@ -279,8 +278,18 @@ def render_model_monitoring():
             f"**Feature hash:** `{feature_hash[:12]}…{feature_hash[-8:]}`"
         )
         st.markdown(
-            f"**Recommendation Policy:** `{active_package.recommendation_policy_id}`"
+            f"**Base model policy:** `{active_package.recommendation_policy_id}`"
         )
+        preparation = getattr(predictor, "preparation_policy", None)
+        if preparation is not None and preparation.reduction_meals > 0:
+            st.markdown(f"**Preparation policy:** `{preparation.policy_id}`")
+            st.markdown(
+                f"**Preparation adjustment:** {preparation.reduction_meals} fewer meals "
+                f"from {preparation.effective_from_service_date}"
+            )
+            st.markdown(
+                f"**Policy configuration:** `{preparation.config_fingerprint[:12]}`"
+            )
 
     def number(value):
         return "—" if value is None else f"{value:.2f}"
@@ -293,6 +302,12 @@ def render_model_monitoring():
         st.error(f"Verified historical backtest unavailable: {backtest_error}")
     if backtest is not None:
         metrics = backtest["metrics"]
+        if getattr(getattr(predictor, "preparation_policy", None), "reduction_meals", 0):
+            st.caption(
+                "The historical Q80 coverage and preparation metrics below describe the "
+                "base model's raw recommendation. The equal-weight preparation plan is "
+                "evaluated separately."
+            )
         cutoff = date.fromisoformat(backtest["attendance_cutoff"])
         if backtest["is_reference_backtest"]:
             st.caption(

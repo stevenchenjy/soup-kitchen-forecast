@@ -4,6 +4,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from src.config import ForecastTargetDateError, model_file_for_location, parse_service_date
+from src.meal_policy import meal_policy_config_fingerprint
 from src.predictor import VisitorPredictor, WeatherForecastUnavailableError
 
 app = FastAPI(title="Visitor Forecast API", version="2.0.0")
@@ -24,22 +25,47 @@ def _get_predictor(location_id: str) -> VisitorPredictor:
     except FileNotFoundError:
         _predictor_cache.pop(location_id, None)
         raise HTTPException(status_code=404, detail=f"Model not found for location: {location_id}")
-    signature = (str(model_path), stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+    try:
+        policy_fingerprint = meal_policy_config_fingerprint()
+    except ValueError as exc:
+        _predictor_cache.pop(location_id, None)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    signature = (
+        str(model_path), stat.st_ino, stat.st_size, stat.st_mtime_ns,
+        stat.st_ctime_ns, policy_fingerprint,
+    )
     cached = _predictor_cache.get(location_id)
     if cached is not None and cached[0] == signature:
         return cached[1]
-    p = VisitorPredictor(str(model_path))
+    try:
+        p = VisitorPredictor(str(model_path))
+    except ValueError as exc:
+        _predictor_cache.pop(location_id, None)
+        raise HTTPException(
+            status_code=503, detail="Model or meal preparation policy is invalid."
+        ) from exc
     # Nightly publication replaces the file atomically. Do not associate a
     # package loaded during replacement with the identity of another version.
     try:
         after = model_path.stat()
+        after_policy_fingerprint = meal_policy_config_fingerprint()
     except FileNotFoundError:
         after = None
+        after_policy_fingerprint = None
+    except ValueError as exc:
+        _predictor_cache.pop(location_id, None)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     if after is None or signature != (
-        str(model_path), after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns
+        str(model_path), after.st_ino, after.st_size, after.st_mtime_ns,
+        after.st_ctime_ns, after_policy_fingerprint,
+    ) or getattr(p, "meal_policy_config_fingerprint", None) not in (
+        None, policy_fingerprint,
     ):
         _predictor_cache.pop(location_id, None)
-        raise HTTPException(status_code=503, detail="Model changed while loading; retry the request.")
+        raise HTTPException(
+            status_code=503,
+            detail="Model or preparation policy changed while loading; retry the request.",
+        )
     _predictor_cache[location_id] = (signature, p)
     return p
 
@@ -68,4 +94,8 @@ def predict_next(req: PredictRequest):
         "model_segment": pred.model_segment,
         "suggested_meals": pred.suggested_meals,
         "meal_buffer_pct": pred.meal_buffer_pct,
+        "recommendation_policy_id": getattr(pred, "recommendation_policy_id", None),
+        "base_recommendation_policy_id": getattr(pred, "base_recommendation_policy_id", None),
+        "raw_recommended_meals": getattr(pred, "raw_recommended_meals", None),
+        "meal_reduction": getattr(pred, "meal_reduction", 0),
     }

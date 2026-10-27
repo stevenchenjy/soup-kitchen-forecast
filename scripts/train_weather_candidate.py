@@ -69,7 +69,7 @@ def train_weather_candidate(
     weather_path = Path(weather_input).expanduser().resolve()
     baseline_sha256 = sha256_file(baseline_path)
     weather_sha256 = sha256_file(weather_path)
-    predictor = VisitorPredictor(str(baseline_path))
+    predictor = VisitorPredictor(str(baseline_path), apply_preparation_policy=False)
     baseline_package = joblib.load(baseline_path)
     if not predictor.uses_locked_f6 or baseline_package.get("location_id") != location_id:
         raise ValueError("Baseline must be a locked F6 package for the requested location")

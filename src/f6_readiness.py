@@ -235,7 +235,7 @@ def verify_candidate_directory(
     if manifest["files"]["model_package.joblib"] != expected_package_sha256:
         raise ValueError("Candidate checksum manifest does not contain the locked package hash")
 
-    predictor = VisitorPredictor(str(package_path))
+    predictor = VisitorPredictor(str(package_path), apply_preparation_policy=False)
     if predictor.package_id != package_id:
         raise ValueError("Loaded package ID differs from candidate metadata")
     if predictor.model_package_schema_version != MODEL_PACKAGE_SCHEMA_VERSION:

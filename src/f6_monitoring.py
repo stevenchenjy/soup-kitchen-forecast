@@ -46,6 +46,8 @@ class ActiveF6Package:
     feature_order_sha256: str
     recommendation_policy_id: str
     training_cutoff: str | None
+    preparation_policy_id: str = RECOMMENDATION_POLICY_ID
+    preparation_policy_effective_from: str | None = None
 
 
 class F6IntegrityError(ValueError):
@@ -108,6 +110,14 @@ def active_f6_package(predictor: Any) -> ActiveF6Package:
         feature_order_sha256=feature_hash,
         recommendation_policy_id=recommendation_policy_id,
         training_cutoff=training_cutoff,
+        preparation_policy_id=str(
+            getattr(getattr(predictor, "preparation_policy", None), "policy_id", RECOMMENDATION_POLICY_ID)
+        ),
+        preparation_policy_effective_from=(
+            str(getattr(predictor.preparation_policy, "effective_from_service_date"))
+            if getattr(getattr(predictor, "preparation_policy", None), "effective_from_service_date", None)
+            else None
+        ),
     )
 
 
@@ -131,9 +141,18 @@ def row_matches_active_f6(
         return False
     if str(row.get("feature_set_id") or "") != contract.feature_set_id:
         return False
+    expected_preparation_policy = contract.recommendation_policy_id
+    if contract.preparation_policy_effective_from:
+        try:
+            service_date = date.fromisoformat(str(row.get("service_date") or "")[:10])
+        except ValueError:
+            return False
+        effective_from = date.fromisoformat(contract.preparation_policy_effective_from)
+        if service_date >= effective_from:
+            expected_preparation_policy = contract.preparation_policy_id
     if (
         str(row.get("recommendation_policy_id") or "")
-        != contract.recommendation_policy_id
+        != expected_preparation_policy
     ):
         return False
 

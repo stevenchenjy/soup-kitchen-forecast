@@ -29,6 +29,7 @@ from src.prediction_logs import (
     update_prediction_logs_with_actual,
 )
 from src.predictor import VisitorPredictor, WeatherForecastUnavailableError
+from src.recommendation_ui import recommendation_ui_policy
 
 st.set_page_config(page_title="Staff Meal Prep Assistant", layout="centered")
 
@@ -142,9 +143,7 @@ if active_package is None:
         "The forecasting system failed an integrity check. Please contact an administrator."
     )
 else:
-    st.caption(
-        "Recommended meals include a built-in safety margin based on expected attendance."
-    )
+    st.caption(recommendation_ui_policy(predictor).recommendation_caption)
     custom_date = st.text_input("Target service date (Saturday/Sunday, YYYY-MM-DD)", value="")
     if st.button("Get meal recommendation", type="primary"):
         try:

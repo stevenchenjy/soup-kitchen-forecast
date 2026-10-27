@@ -210,9 +210,13 @@ def test_training_writes_only_versioned_candidate_and_roundtrips(tmp_path, monke
     context = {"zip_code": "12550", "country_code": "US", "timezone": "America/New_York"}
     joblib.dump({"location_id": "ny_12550", "weather_context": context}, baseline)
     original = baseline.read_bytes()
-    monkeypatch.setattr(trainer, "VisitorPredictor", lambda path: SimpleNamespace(
-        uses_locked_f6=True, package_id="f6_test_v1", history_df=history,
-    ))
+    def raw_baseline(path, *, apply_preparation_policy):
+        assert apply_preparation_policy is False
+        return SimpleNamespace(
+            uses_locked_f6=True, package_id="f6_test_v1", history_df=history,
+        )
+
+    monkeypatch.setattr(trainer, "VisitorPredictor", raw_baseline)
     monkeypatch.setattr(candidate, "fit_final_models_by_daytype", spy_fit)
     times = [f"{day.date().isoformat()}T{hour}:00" for day in history[DATE_COL] for hour in (11, 12, 13)]
     hourly = {"time": times}

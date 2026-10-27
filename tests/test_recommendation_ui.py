@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from datetime import date
+from unittest.mock import patch
 
 from src.production_features import RECOMMENDATION_POLICY_ID
 from src.recommendation_ui import recommendation_ui_policy
@@ -35,3 +37,29 @@ def test_legacy_ui_retains_percentage_buffer_and_identifies_schema() -> None:
     assert policy.package_caption == (
         "Model package: visitor_model_ny_12550.joblib · schema v1"
     )
+
+
+def test_equal_weight_ui_describes_the_effective_plan_without_relabelling_raw_q80():
+    from src.meal_policy import load_preparation_policy
+
+    predictor = SimpleNamespace(
+        uses_locked_f6=True,
+        recommendation_policy_id=RECOMMENDATION_POLICY_ID,
+        model_package_schema_version=2,
+        package_id="f6-candidate-v1",
+        feature_contract={"feature_set_id": "F6_COMPACT_SELECTED"},
+        preparation_policy=load_preparation_policy("ny_12550"),
+    )
+    with patch("src.config.forecast_today", return_value=date(2026, 10, 26)):
+        current = recommendation_ui_policy(predictor)
+    assert current.show_percentage_buffer is False
+    assert current.recommendation_label == "Equal-weight meal recommendation"
+    assert current.preparation_label == "Equal-weight meal plan"
+    assert current.recommendation_caption == (
+        "Meal recommendations balance excess meals and shortages equally."
+    )
+    assert "P1_EQUAL_WEIGHT_Q80_MINUS_7" in current.package_caption
+    with patch("src.config.forecast_today", return_value=date(2026, 10, 19)):
+        previous = recommendation_ui_policy(predictor)
+    assert previous.preparation_label == "Raw Q80 recommendation"
+    assert previous.recommendation_label == "Raw 80th-percentile recommendation"

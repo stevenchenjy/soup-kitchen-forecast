@@ -81,6 +81,33 @@ def predictor(package_id: str = PACKAGE_ID, **overrides):
     return SimpleNamespace(**values)
 
 
+def test_active_monitoring_matches_the_applied_policy_for_each_service_date():
+    preparation = SimpleNamespace(
+        policy_id="P1_EQUAL_WEIGHT_Q80_MINUS_7",
+        reduction_meals=7,
+        effective_from_service_date="2026-10-31",
+    )
+    contract = active_f6_package(predictor(preparation_policy=preparation))
+    raw_before = active_row(service_date="2026-10-25")
+    adjusted_after = active_row(
+        service_date="2026-10-31",
+        recommendation_policy_id=preparation.policy_id,
+        suggested=108,
+    )
+    stale_after = active_row(service_date="2026-10-31")
+    premature = active_row(
+        service_date="2026-10-25", recommendation_policy_id=preparation.policy_id
+    )
+    missing_date = active_row(service_date="", recommendation_policy_id=preparation.policy_id)
+    assert filter_active_f6_rows(
+        [raw_before, adjusted_after, stale_after, premature, missing_date], contract
+    ) == [raw_before, adjusted_after]
+    # The registered backtest still describes the raw C0 model package.
+    summary = load_verified_backtest_summary(contract)
+    assert summary["recommendation_policy_id"] == POLICY_ID
+    assert contract.preparation_policy_id == preparation.policy_id
+
+
 def active_row(
     *,
     row_id: int = 1,

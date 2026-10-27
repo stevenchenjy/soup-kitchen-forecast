@@ -47,7 +47,7 @@ def validate_f6_package_file(
             f"Model package SHA-256 mismatch: {actual_sha256} != {expected_sha256}"
         )
 
-    predictor = VisitorPredictor(str(package_path))
+    predictor = VisitorPredictor(str(package_path), apply_preparation_policy=False)
     if predictor.model_package_schema_version != MODEL_PACKAGE_SCHEMA_VERSION:
         raise ValueError("F6 publication requires model-package schema version 2")
     if expected_package_id is not None and predictor.package_id != expected_package_id:
@@ -96,7 +96,7 @@ def validate_legacy_package_file(
         raise ValueError(
             f"Legacy package SHA-256 mismatch: {actual_sha256} != {expected_sha256}"
         )
-    predictor = VisitorPredictor(str(package_path))
+    predictor = VisitorPredictor(str(package_path), apply_preparation_policy=False)
     if predictor.model_package_schema_version != 1:
         raise ValueError("Rollback package must use model-package schema version 1")
     if len(predictor.feature_cols) != expected_feature_count:
